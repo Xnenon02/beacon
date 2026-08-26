@@ -20,7 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Beacon\Beacon.csproj" />
+    <ProjectReference Include="..\..\src\Beacon.Api\Beacon.Api.csproj" />
   </ItemGroup>
 
 </Project>
