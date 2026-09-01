@@ -30,7 +30,50 @@ Every resource below follows this pattern:
 - The `-we` suffix marks **West Europe**, chosen after the first attempt hit
   a capacity issue in Sweden Central — see Step 1.
 
+## Prerequisites
+
+Before Step 1:
+
+1. **Log in and confirm the active subscription:**
+
+   ```bash
+   az login
+   az account show --query "{name:name, user:user.name}" -o table
+   ```
+
+2. **Confirm the .NET SDK version matches the project target** (.NET 10):
+
+   ```bash
+   dotnet --version
+   ```
+
+3. **Clone the repo and `cd` into it** so the relative paths used below
+   (`src/Beacon.Api`, `artifacts/publish`) resolve correctly.
+
+4. **Run the app locally first**, before touching Azure. This gives you a
+   baseline — if something breaks later, you'll know whether the problem is
+   in the app or in the deployment:
+
+   ```bash
+   dotnet run --project src/Beacon.Api
+   ```
+
+   Then, in another terminal, hit the health endpoint on whatever port
+   `dotnet run` printed (e.g. `http://localhost:5000/health`):
+
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}\n" http://localhost:<port>/health
+   ```
+
+   Expect `200` before moving on.
+
 ## Step 1: Create the App Service Plan
+
+> **Historical failed attempt — do not copy this command.** It's kept here
+> because the failure and the decision it led to are part of the story. It
+> uses the plain (non-`-we`) names on purpose, matching what was actually
+> typed at the time. The command that actually worked is in Step 3, using
+> the `-we`-suffixed names from the table above.
 
 ```bash
 az appservice plan create \
@@ -112,10 +155,10 @@ Both take roughly 30 seconds. Both return a yellow `WARNING` line that is not
 an error — the first confirms `(Linux, SKU: B1)`, the second says "Deploy
 your code with: az webapp deploy", i.e. exactly the next step.
 
-`--is-linux` is technically the default as of Azure CLI 2.88 (July 2026), but
-it's worth typing explicitly — a command that states what it does is worth
-five extra characters, and it protects against an older CLI where the
-default was Windows (where `DOTNETCORE:10.0` isn't a valid runtime).
+`--is-linux` is explicit here even though current Azure CLI defaults to
+Linux — a command that states what it does is worth five extra characters,
+and it protects against an older CLI where the default was Windows (where
+`DOTNETCORE:10.0` isn't a valid runtime).
 
 ## Step 4: Deploy the code
 
@@ -171,20 +214,12 @@ Azure's `SCM_DO_BUILD_DURING_DEPLOYMENT` note in the response can be ignored
 here — `dotnet publish` already built the package, which is the whole point
 of the step before. That setting matters for source-only deploys.
 
-**Result (actual run):** deploy printed `Deployment has completed
-successfully`, but the polling step hit a dropped connection
-(`ConnectionAbortedError`) while checking the deployment status endpoint, and
-the final JSON reported `"status": "BuildSuccessful"` rather than
-`"RuntimeSuccessful"` — with `numberOfInstancesSuccessful: 0`. This looked
-concerning at first glance, but the app was confirmed live and healthy via
-the Step 5 health check (`200`), so the odd status was a polling/reporting
-quirk, not a failed deployment. Worth noting in the tutorial as a real-world
-gotcha: don't trust the JSON status field alone — verify with the health
-endpoint.
-
-**Likely cause:** local DNS instability during this session (internet dropped
-a few times), which plausibly broke the polling connection to the deployment
-status endpoint mid-request without affecting the deployment itself.
+**Gotcha:** the deploy command's own status polling can fail or report a
+misleading status (e.g. `"BuildSuccessful"` with `numberOfInstancesSuccessful:
+0`, or a dropped `ConnectionAbortedError`) even when the deployment itself
+succeeded. **CLI polling can fail even if deployment succeeds — always verify
+the application independently using `/health`** (Step 5), not the JSON status
+field alone.
 
 ## Step 5: Verify the app responds
 
@@ -198,6 +233,11 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 **Result:** `200` — app confirmed live and healthy.
 
 ## Step 6: Scale out and verify (K2 evidence)
+
+This is **manual scale-out**, not autoscaling. The **Basic** tier (B1)
+supports manually setting the worker count (up to 3), but rule-based
+autoscale — where Azure adds/removes instances automatically based on load —
+requires the **Standard** tier or higher.
 
 Check the current plan tier/instance count:
 
@@ -331,12 +371,22 @@ path-conversion step entirely for this one command, so `/health` is passed
 through to `az` exactly as typed.
 
 *Why it's the safer default:* it produces the exact intended value,
-`/health`, with no ambiguity. It's also portable to put in a tutorial others
-will follow on different machines — `MSYS_NO_PATHCONV` only means something
-in Git Bash/MSYS on Windows; on macOS/Linux terminals or PowerShell it's an
-unused environment variable with no effect, and there's no path-mangling bug
-there to begin with. Same command line works everywhere, whether or not the
-person running it is on Git Bash.
+`/health`, with no ambiguity. `MSYS_NO_PATHCONV` only means something in Git
+Bash/MSYS on Windows; on macOS/Linux terminals it's an unused environment
+variable with no effect, and there's no path-mangling bug there to begin
+with — same command line works everywhere on those.
+
+**PowerShell/cmd note:** the `VAR=value command` form above is Unix/Git-Bash
+syntax and does **not** work in PowerShell or cmd — those shells don't
+rewrite `/health` in the first place, so the bug doesn't occur there and no
+workaround is needed. If you are in PowerShell, just run:
+
+```powershell
+az webapp config set `
+  --resource-group rg-clo25-namn-we `
+  --name app-clo25-namn-we `
+  --generic-configurations health_check_path="/health"
+```
 
 Then re-verify with the same `show` command as before, expecting `/health`
 this time.
