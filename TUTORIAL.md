@@ -590,3 +590,35 @@ a real failure).
 `/health` to report a version or build identifier the script can compare
 against what was just deployed. Worth doing once the app has a natural
 place to put that (a build-time stamp, a commit SHA, something similar).
+
+## Fördjupning 06 notes
+
+Read the live log stream (`az webapp log tail`) through a restart — got the
+full startup sequence (`Running the command: dotnet "Beacon.Api.dll"` →
+`Now listening on...` → `Application started.` → `Hosting environment:
+Production` → `Site startup probe succeeded after 70.7 seconds`), and hit
+the documented "stream interrupts itself" behavior firsthand: it cut off
+with `Log stream interrupted. Exiting live log stream.` right before the
+final `Site started.` line, because the restart tears down the very
+connection you're watching from. Confirmed the app was actually up anyway
+via a plain `curl` — `200`.
+
+`httpsOnly` was `False` by default (as it is on every app `az webapp
+create` makes) — that doesn't mean the app lacks HTTPS, every
+`*.azurewebsites.net` app has a certificate automatically. It only
+controls whether `http://` gets redirected to `https://`. Turned it on
+(`az webapp update --https-only true`) and confirmed with `curl`: `http://`
+now returns a `301` to the `https://` URL instead of answering directly.
+
+**On `paths-ignore` vs. `paths`:** decided to stick with a deny-list
+(`paths-ignore: ['**.md', '**.http']`) rather than switching to an
+allow-list like `paths: ['src/**']`. Checked it against this project's own
+history: under an allow-list, 2 of the 3 CI/CD-related pushes made today —
+including the one that added the pipeline itself — would have silently
+never triggered a run, since they only touched `.github/workflows/` and
+`scripts/`. A deny-list's worst case is a wasted ~78s run; an allow-list's
+worst case is a push that should deploy and doesn't, with nothing visibly
+wrong. Added `'**.http'` (matching `requests.http`, a dev-only file that
+never affects build or runtime behavior) using the glob rather than the
+literal filename, so it still applies if such a file ever moves into a
+subfolder.
