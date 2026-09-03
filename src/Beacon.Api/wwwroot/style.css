@@ -1,0 +1,130 @@
+:root {
+  color-scheme: dark;
+  --bg: #1b2838;
+  --bg-card: #2a3f5a;
+  --text: #c7d5e0;
+  --accent: #66c0f4;
+  --accent-strong: #1a9fff;
+  --price: #a4d007;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 2rem 1.5rem 1.5rem;
+  text-align: center;
+}
+
+h1 {
+  margin: 0;
+  color: #fff;
+  letter-spacing: 0.05em;
+}
+
+.subtitle {
+  color: var(--accent);
+  margin: 0.25rem 0 1.5rem;
+}
+
+#search-form {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+#search-input {
+  width: min(400px, 80vw);
+  padding: 0.6rem 1rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--bg-card);
+  color: #fff;
+  font-size: 1rem;
+}
+
+button {
+  padding: 0.6rem 1.2rem;
+  border-radius: 4px;
+  border: none;
+  background: var(--accent-strong);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent);
+}
+
+main {
+  padding: 1rem 1.5rem 3rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+#status-message {
+  text-align: center;
+  color: var(--accent);
+  min-height: 1.2rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.25rem;
+  margin-top: 1rem;
+}
+
+.card {
+  background: var(--bg-card);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.card-image {
+  width: 100%;
+  display: block;
+}
+
+.card-body {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.card-body h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #fff;
+}
+
+.price {
+  color: var(--price);
+  font-weight: 600;
+  margin: 0;
+}
+
+.players {
+  color: var(--accent);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.description {
+  font-size: 0.85rem;
+  color: var(--text);
+  margin: 0;
+}

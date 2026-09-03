@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beacon - Game Browser</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Beacon</h1>
+    <p class="subtitle">Search Steam games for live player counts, price, and a short description</p>
+    <form id="search-form">
+      <input type="text" id="search-input" placeholder="Search for a game (e.g. Dota 2)" autocomplete="off" />
+      <button type="submit">Search</button>
+    </form>
+  </header>
+
+  <main>
+    <p id="status-message"></p>
+    <div id="results" class="grid"></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
