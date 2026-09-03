@@ -489,3 +489,104 @@ return `ResourceGroupNotFound` — full success — or, if run too soon, might
 still show the group with resources present but disappearing. If that
 happens, it's not a failure, just a timing thing: wait a bit and re-run the
 check.**
+
+# CI/CD pipeline (lab 03)
+
+## Del 0: rebuilding from scratch
+
+Same five commands as before (group, plan, app, publish, deploy), same
+naming convention. This time capacity was a bigger problem than usual:
+Sweden Central and West Europe both failed with "no available instances,"
+and North Europe failed differently — `Current Limit (B1 VMs): 0`, a real
+subscription quota of zero in that region, not a transient issue. West
+Europe had already proven to work earlier in the day (this exact
+subscription successfully created and scaled a B1 plan there before), so
+that's the region worth retrying rather than guessing at untested ones. A
+short retry loop (a few attempts, minutes apart) got past the transient
+capacity error on the second try. Lesson for next time: if a region fails,
+check whether it's the "no available instances" message (transient, worth
+retrying) or a quota number in the error (not transient, needs a different
+region or a quota increase request).
+
+## Del 1: connecting the repo to Azure
+
+Followed the lab's 8 steps in order — read the real name/address from
+Azure rather than trusting memory, enabled basic publishing credentials on
+the `scm` site, fetched the publish profile, set it as the
+`AZURE_WEBAPP_PUBLISH_PROFILE` GitHub secret, deleted the local copy
+immediately and gitignored it, set `SCM_DO_BUILD_DURING_DEPLOYMENT=false`
+explicitly, and wrote `.github/workflows/deploy.yml`.
+
+Two things worth a note:
+
+- The lab's own placeholder check (`grep -n "clo25-namn"`) gives a false
+  positive here, because this project's naming convention appends a region
+  suffix (`-we`), and `app-clo25-namn-we` still contains the substring
+  `clo25-namn`. That's expected — the values are correctly filled in, just
+  not literally absent from the grep.
+- `workflow_dispatch` only works for a workflow file that already exists on
+  the repo's *default* branch. Pushed on a feature branch first (per this
+  project's own rule of never pushing straight to `main`), which meant the
+  pipeline couldn't be dry-run before merging — GitHub simply doesn't
+  register a workflow file living only on a branch. Adding a `pull_request`
+  trigger as a workaround isn't a good idea for this workflow either, since
+  the `deploy` job pushes to the real Azure app — you don't want that
+  firing on every PR. So the actual first run only happened at merge time,
+  which lines up with what the lab calls the checkpoint anyway.
+
+## Del 2: getting deploy green, and confirming it's not just theater
+
+First run went green immediately — no auth troubleshooting needed this
+time (`gh auth setup-git`, done back in lab 02's prep, meant the publish
+profile secret was correct on the first try).
+
+Pushed a small, visible text change (added "— deployed via CI/CD" to the
+UI's subtitle) specifically to prove the pipeline deploys *real* changes,
+not just that the YAML runs. Confirmed two ways: the workflow's own log
+went green, and — separately — `curl`ing the live app afterward showed the
+new text. The lab's warning about the propagation gap (green != new code
+live yet) held up here too: checked immediately after green and it can
+still be stale for roughly a minute while App Service swaps to the new
+package.
+
+## Del 3: smoke test script (F3)
+
+`scripts/health-check.sh` — a smoke test, not a correctness test. It asks
+exactly one question: does the app respond `200` on a given URL? It doesn't
+check that the response is *right*, only that something is listening and
+healthy. Real correctness checks already ran in the `build` job's
+`dotnet test` step.
+
+Built with two arguments: the URL (required — the script refuses to run
+without it, with a clear error) and an optional attempt count (defaults to
+10, 5 seconds apart). Tested locally both ways before touching the
+pipeline: against the real `/health` (succeeded on attempt 1, exit 0), and
+against a nonexistent path with only 2 attempts (two `404`s, "Giving up.",
+exit 1, done in ~5 seconds instead of the default ~45).
+
+Wired into the `deploy` job *after* the actual deploy step, with
+`actions/checkout` added first in that job (the script lives in the repo,
+and each job starts on a clean machine with nothing checked out — and
+checkout has to come before `download-artifact`, since checkout clears the
+working directory and would delete the downloaded package if it ran
+second).
+
+**The honest limitation, worth remembering:** a green smoke test here only
+proves the app answered `200` — not that it's running the *new* code. If
+the health check runs moments after deploy finishes, it's entirely possible
+the still-running old version answers first, before App Service has
+swapped to the new package. What this script *does* reliably catch is the
+worst case — a new version that fails to start at all, which would make
+`/health` stop responding and turn the *next* deploy's health check red.
+The loop (attempts + delay) exists specifically so a normal, brief restart
+window doesn't get mistaken for that failure — a single `curl` with no
+retry would have flagged this exact deploy as broken on the first run of
+the day, purely because `/health` hadn't started answering yet (a handful
+of `404`s while the new app boots is normal on a fresh app; ten in a row is
+a real failure).
+
+**Idea for later (F2):** the only way to make this script actually confirm
+"the new code is live," not just "something answered `200`," is for
+`/health` to report a version or build identifier the script can compare
+against what was just deployed. Worth doing once the app has a natural
+place to put that (a build-time stamp, a commit SHA, something similar).
