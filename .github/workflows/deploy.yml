@@ -6,6 +6,7 @@ on:
       - main
     paths-ignore:
       - '**.md'
+      - '**.http'
   workflow_dispatch:
 
 env:
