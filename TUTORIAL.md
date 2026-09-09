@@ -622,3 +622,84 @@ wrong. Added `'**.http'` (matching `requests.http`, a dev-only file that
 never affects build or runtime behavior) using the glob rather than the
 literal filename, so it still applies if such a file ever moves into a
 subfolder.
+
+## Next: Infrastructure as Code (Bicep) — prep notes for 2026-09-10
+
+Not done yet — this is prep, written before the lab, not a report of results.
+That day's lab builds on everything above: Azure will be empty again, and
+Part 0 of that lab is "build the app from your own TUTORIAL.md" — Steps 1–8
+near the top of this file, not the lab sheet.
+
+**Goal for the day:** the App Service described in `infra/main.bicep`,
+deployed against the existing app, plus `scripts/deploy-infra.sh` to run the
+deployment, wired into the workflow (pipeline or terminal, depending on
+Plan A/B below).
+
+**Four checks to run before 09:00, so nothing blocks at 13:30 on something
+that takes two minutes now:**
+
+```bash
+gh run list --limit 1
+az account show --query name --output tsv
+az bicep version
+bash --version | head -1
+```
+
+**Plan A vs Plan B** — decide/remember which one applies (this was settled
+Tuesday):
+
+| | Plan A | Plan B |
+|---|---|---|
+| In the repo | Template, param file, script | Template, param file, script |
+| Runs the infra deploy | The pipeline | Me, in the terminal |
+| Requires | A service principal | Nothing extra |
+| In the tutorial | Describe the infra job | Describe why manual |
+
+Plan B is fully accepted — same files either way, the difference is who
+presses the button.
+
+**Things likely to trip me up, per the lab notes — write in the answer once
+actually hit, don't pre-guess:**
+
+- **Parameter vs. variable:** would two people want a different value here?
+  Yes → parameter. No → variable.
+- **Symbolic name vs. `name`:** the symbolic name is internal to the Bicep
+  file; `name: planName` (e.g. `asp-clo25-namn`) is the name Azure actually
+  uses.
+- **`what-if` only previews** — it changes nothing.
+- **Runtime string is spelled two different ways for the same thing:**
+  `az` commands want `DOTNETCORE:10.0` (colon), Bicep wants
+  `DOTNETCORE|10.0` (pipe). Easy to miss the character.
+- Before writing a line of Bicep, run:
+  ```bash
+  az webapp show \
+    --resource-group rg-clo25-namn-we \
+    --name app-clo25-namn-we \
+    --query "{kind:kind, plan:serverFarmId}" \
+    --output json
+  ```
+  `kind` decides `reserved`/`linuxFxVersion` vs `netFrameworkVersion` in the
+  plan/app resources. Note: names above use this walkthrough's actual `-we`
+  resources, not the lab sheet's plain `rg-clo25-namn` — substitute
+  whichever resource group/app actually exists when this is run (check the
+  CI/CD pipeline section above for whatever the most recent rebuild used).
+- **Reading `what-if` output:** only the resource lines
+  (`Microsoft.Web/...`) matter, not the indented property lines under them.
+  `~` on a resource line = expected change. `+` on a resource line = wrong
+  `appName`/`planName` in the parameter file — don't deploy. `-` = something
+  would be deleted — stop. A `+` on a *property* line (e.g.
+  `minTlsVersion: "1.3"`) is a real, intentional change, not an error.
+- Two App Service plans after deploying = wrong `planName` in the parameter
+  file — Bicep won't delete the one it doesn't recognize, so the stray empty
+  one is the tell.
+- **Identity vs. role vs. scope**, if Plan A: the identity (Entra ID)
+  survives tearing down the resource group; the role assignment (scoped to
+  the resource group) does not. Symptom next time: identity still exists,
+  pipeline fails with `AuthorizationFailed` — re-run the role assignment,
+  it's not a bug.
+
+**Still to write once actually done:** which resources the template creates
+and why (K1), how scaling is defined and why that value (K2), what counts as
+security in the template — `httpsOnly`, `minTlsVersion`, health check (K2),
+how the infra actually gets deployed and why, plus what the next step would
+be (F2, Komp1).
