@@ -658,6 +658,25 @@ Tuesday):
 Plan B is fully accepted — same files either way, the difference is who
 presses the button.
 
+**Correction, 2026-09-10 — this was wrong.** Tuesday's `az ad sp
+create-for-rbac` failure was re-run this morning and it actually
+**succeeded**, once run with `MSYS_NO_PATHCONV=1`. The `--scopes` argument
+(`/subscriptions/<id>/resourceGroups/...`) hit the exact same Git Bash
+path-mangling bug documented in Step 7 above — the leading `/` got rewritten
+to `C:/Program Files/Git/subscriptions/...`, and Azure rejected the garbled
+scope with `MissingSubscription`. That looked like a permissions problem;
+it was the same shell quirk in a new place. **Switched to Plan A** as a
+result: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` are now set as GitHub secrets from the successful
+run, so the pipeline can run the infra deploy itself.
+
+**The actual lesson:** the Git Bash path bug isn't a one-off quirk tied to
+`health_check_path` — it silently breaks *any* `az` argument that starts
+with a single `/`, including resource IDs and scopes. Worth checking any
+future `az` command with a leading-slash argument for this before trusting
+a failure message at face value, especially one that sounds like a
+permissions error but might just be a mangled path.
+
 **Things likely to trip me up, per the lab notes — write in the answer once
 actually hit, don't pre-guess:**
 
