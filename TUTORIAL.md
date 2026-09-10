@@ -623,83 +623,103 @@ never affects build or runtime behavior) using the glob rather than the
 literal filename, so it still applies if such a file ever moves into a
 subfolder.
 
-## Next: Infrastructure as Code (Bicep) — prep notes for 2026-09-10
+## Infrastructure as Code (Bicep) — lab 04, 2026-09-10
 
-Not done yet — this is prep, written before the lab, not a report of results.
-That day's lab builds on everything above: Azure will be empty again, and
-Part 0 of that lab is "build the app from your own TUTORIAL.md" — Steps 1–8
-near the top of this file, not the lab sheet.
+Chose **Plan A** on Tuesday (Fördjupning 07): `az ad sp create-for-rbac`
+succeeded once run with `MSYS_NO_PATHCONV=1` — the failure earlier that day
+was the same Git Bash path-mangling bug as the `health_check_path` gotcha
+above, not a real permissions problem (see the correction note this
+produced, merged from `docs/plan-a-correction`).
 
-**Goal for the day:** the App Service described in `infra/main.bicep`,
-deployed against the existing app, plus `scripts/deploy-infra.sh` to run the
-deployment, wired into the workflow (pipeline or terminal, depending on
-Plan A/B below).
+### What the template creates, and why (K1)
 
-**Four checks to run before 09:00, so nothing blocks at 13:30 on something
-that takes two minutes now:**
+`infra/main.bicep` describes two resources: the App Service plan
+(`Microsoft.Web/serverfarms`) and the web app (`Microsoft.Web/sites`), linked
+via `serverFarmId: plan.id` inside the template rather than a hardcoded
+resource ID. Nothing else — no resource group (it's deployed *into* one that
+already exists; `az group create` lives in the deploy script instead, not
+the template) and no app settings (declaring `appSettings` would replace
+*all* existing ones, wiping `SCM_DO_BUILD_DURING_DEPLOYMENT` from lab 03 —
+deliberately left out of the template rather than fixed with a merge, since
+getting that merge wrong silently loses settings).
 
-```bash
-gh run list --limit 1
-az account show --query name --output tsv
-az bicep version
-bash --version | head -1
-```
+### Scaling (K2)
 
-**Plan A vs Plan B** — decide/remember which one applies (this was settled
-Tuesday):
+`sku.capacity: instanceCount`, parameterized with a default of `2` but
+deployed with `instanceCount = 3` in `infra/main.bicepparam` — matching the
+manual scale-out already done by hand in week 35 (`az appservice plan update
+--number-of-workers 3`). The value isn't the template's default; it's a
+choice, now written down instead of living only in shell history.
 
-| | Plan A | Plan B |
-|---|---|---|
-| In the repo | Template, param file, script | Template, param file, script |
-| Runs the infra deploy | The pipeline | Me, in the terminal |
-| Requires | A service principal | Nothing extra |
-| In the tutorial | Describe the infra job | Describe why manual |
+### Security in the template (K2)
 
-Plan B is fully accepted — same files either way, the difference is who
-presses the button.
+`httpsOnly: true` and `minTlsVersion: '1.3'` on the site config, plus
+`healthCheckPath: '/health'`. `minTlsVersion` isn't decorative — it raises
+the floor a client must meet during the TLS handshake; every modern browser
+and `curl` already clears 1.3, so nothing observable changes, but a
+TLS-1.2-only client would now be refused. `what-if` (Step 6) confirmed both
+`httpsOnly` and `alwaysOn` were actually `false` on the live app before this
+deploy — settings assumed correct from week 35 but never verified until they
+were written down as code and compared against reality.
 
-**Things likely to trip me up, per the lab notes — write in the answer once
-actually hit, don't pre-guess:**
+### How it's deployed, and why (F2, Komp1)
 
-- **Parameter vs. variable:** would two people want a different value here?
-  Yes → parameter. No → variable.
-- **Symbolic name vs. `name`:** the symbolic name is internal to the Bicep
-  file; `name: planName` (e.g. `asp-clo25-namn`) is the name Azure actually
-  uses.
-- **`what-if` only previews** — it changes nothing.
-- **Runtime string is spelled two different ways for the same thing:**
-  `az` commands want `DOTNETCORE:10.0` (colon), Bicep wants
-  `DOTNETCORE|10.0` (pipe). Easy to miss the character.
-- Before writing a line of Bicep, run:
-  ```bash
-  az webapp show \
-    --resource-group rg-clo25-namn-we \
-    --name app-clo25-namn-we \
-    --query "{kind:kind, plan:serverFarmId}" \
-    --output json
-  ```
-  `kind` decides `reserved`/`linuxFxVersion` vs `netFrameworkVersion` in the
-  plan/app resources. Note: names above use this walkthrough's actual `-we`
-  resources, not the lab sheet's plain `rg-clo25-namn` — substitute
-  whichever resource group/app actually exists when this is run (check the
-  CI/CD pipeline section above for whatever the most recent rebuild used).
-- **Reading `what-if` output:** only the resource lines
-  (`Microsoft.Web/...`) matter, not the indented property lines under them.
-  `~` on a resource line = expected change. `+` on a resource line = wrong
-  `appName`/`planName` in the parameter file — don't deploy. `-` = something
-  would be deleted — stop. A `+` on a *property* line (e.g.
-  `minTlsVersion: "1.3"`) is a real, intentional change, not an error.
-- Two App Service plans after deploying = wrong `planName` in the parameter
-  file — Bicep won't delete the one it doesn't recognize, so the stray empty
-  one is the tell.
-- **Identity vs. role vs. scope**, if Plan A: the identity (Entra ID)
-  survives tearing down the resource group; the role assignment (scoped to
-  the resource group) does not. Symptom next time: identity still exists,
-  pipeline fails with `AuthorizationFailed` — re-run the role assignment,
-  it's not a bug.
+`scripts/deploy-infra.sh` wraps `az deployment group create` (plus a resource
+group existence guard, since the group is torn down daily) and supports
+`--what-if` for a dry run. It's wired into `.github/workflows/deploy.yml` as
+its own `infra` job, running in parallel with `build`, with `deploy` gated on
+`needs: [build, infra]` so the app can never deploy before the plan exists.
+Chosen over inlining the Azure CLI calls directly in the YAML so the exact
+same script can be run by hand (`./scripts/deploy-infra.sh rg-clo25-namn-we`)
+or by the pipeline — one implementation, two callers.
 
-**Still to write once actually done:** which resources the template creates
-and why (K1), how scaling is defined and why that value (K2), what counts as
-security in the template — `httpsOnly`, `minTlsVersion`, health check (K2),
-how the infra actually gets deployed and why, plus what the next step would
-be (F2, Komp1).
+**Two real failures hit during Del 3–4, not simulated ones:**
+
+1. `azure/login@v3` was first configured with separate `client-id` /
+   `client-secret` / `tenant-id` / `subscription-id` inputs, matching the
+   four secrets that happened to already exist in the repo. The action
+   rejected `client-secret` outright — v3 only accepts a combined `creds`
+   JSON secret, or OIDC (no secret at all, `client-id`/`tenant-id`/
+   `subscription-id` plus `id-token: write`). Fixed by re-running
+   `create-for-rbac` against the existing identity (patched in place, not
+   duplicated) and storing the result as `AZURE_CREDENTIALS`.
+2. The `deploy` job then failed with `401 Unauthorized` from
+   `azure/webapps-deploy@v3` — the app had been rebuilt earlier the same day
+   and basic publishing credentials were off again, exactly the gotcha noted
+   in Step 4 above. Fixed the same way: `az resource update` on
+   `basicPublishingCredentialsPolicies`, then a fresh publish profile.
+
+### Identity vs. role vs. scope — the tradeoff (K2, Komp2)
+
+The service principal's role assignment is scoped to the resource group
+(`--scopes .../resourceGroups/rg-clo25-namn-we`), not the subscription. That
+means the assignment — unlike the identity itself — does **not** survive a
+teardown, and the pipeline would fail on `AuthorizationFailed` next time
+until it's re-granted. The alternative (scope the role at the subscription
+level) would survive teardown and remove this problem entirely, at the cost
+of letting the pipeline create or delete anything in the whole subscription,
+not just this one resource group. Chose the narrow scope and paid for it
+with a script, not a wider blast radius.
+
+**Del 4 removed the two things that used to require doing by hand every
+lesson day:**
+
+- **Publish-profile rotation** — `deploy` now authenticates with the same
+  service principal as `infra` (`azure/login` step added, `publish-profile`
+  input removed from `azure/webapps-deploy`). The key that used to die with
+  every rebuilt app is gone entirely; the identity in Entra ID doesn't need
+  rotating.
+- **The role assignment itself** — `scripts/deploy-infra.sh` now looks up
+  the identity by name (`SP_NAME`, not a hardcoded object ID — the script
+  queries Entra ID for it, so no tenant identifiers live in the repo) and
+  re-grants `Contributor` on the resource group if the assignment is
+  missing. Guarded with `2>/dev/null || true` so a lookup failure (e.g. the
+  pipeline's own identity not being allowed to read the directory) skips the
+  block silently rather than failing the whole deployment — in practice,
+  this run's pipeline *could* read the directory and printed `pipeline
+  identity already has Contributor`, so the guard wasn't needed this time,
+  but stays as protection for whenever it is.
+
+Net effect: rebuilding from scratch next lesson day is one command
+(`./scripts/deploy-infra.sh rg-clo25-namn-we`), with no manual key or role
+step left to forget.
