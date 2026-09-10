@@ -18,6 +18,7 @@ fi
 RESOURCE_GROUP="${1:?Provide the resource group as the first argument}"
 PARAM_FILE="${2:-infra/main.bicepparam}"
 LOCATION="${LOCATION:-westeurope}"
+SP_NAME="${SP_NAME:-sp-clo25-namn-we}"
 TEMPLATE="infra/main.bicep"
 
 echo "Template:       $TEMPLATE"
@@ -56,3 +57,39 @@ APP_URL=$(az deployment group create \
   --output tsv)
 
 echo "Done. App URL: $APP_URL"
+
+# The identity survives a teardown. Its role assignment does not: the assignment
+# belongs to the resource group, and dies with it. Grant it again if it is gone.
+#
+# Look the identity up rather than keeping its id in the file. Run from a
+# terminal this succeeds. Run by the pipeline it comes back empty, because the
+# service principal may not read the directory - and the block is then skipped,
+# which is right, since it may not hand out roles either.
+if [ -z "${SP_OBJECT_ID:-}" ]; then
+  SP_OBJECT_ID=$(az ad sp list \
+    --display-name "$SP_NAME" \
+    --query "[?displayName=='$SP_NAME'].id" \
+    --output tsv 2>/dev/null || true)
+fi
+
+if [ -n "${SP_OBJECT_ID:-}" ]; then
+  SCOPE="/subscriptions/$(az account show --query id --output tsv)"
+  SCOPE="$SCOPE/resourceGroups/$RESOURCE_GROUP"
+  EXISTING=$(az role assignment list \
+    --assignee-object-id "$SP_OBJECT_ID" \
+    --scope "$SCOPE" \
+    --fill-principal-name false \
+    --query "[0].id" \
+    --output tsv)
+  if [ -z "$EXISTING" ]; then
+    echo "Role:           granting Contributor to the pipeline identity"
+    az role assignment create \
+      --assignee-object-id "$SP_OBJECT_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role Contributor \
+      --scope "$SCOPE" \
+      --output none
+  else
+    echo "Role:           pipeline identity already has Contributor"
+  fi
+fi
