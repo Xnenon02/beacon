@@ -482,3 +482,4 @@ $RECYCLE.BIN/
 *.swp
 publish-profile.xml
 *.publishsettings
+infra/*.json
