@@ -12,9 +12,29 @@ on:
 env:
   AZURE_WEBAPP_NAME: app-clo25-namn-we
   AZURE_WEBAPP_HOSTNAME: app-clo25-namn-we.azurewebsites.net
+  AZURE_RESOURCE_GROUP: rg-clo25-namn-we      # new this week
   DOTNET_VERSION: '10.0.x'
 
 jobs:
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Sign in to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the infrastructure
+        run: |
+          chmod +x ./scripts/deploy-infra.sh
+          ./scripts/deploy-infra.sh "${{ env.AZURE_RESOURCE_GROUP }}"
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -45,7 +65,7 @@ jobs:
           path: artifacts/publish
 
   deploy:
-    needs: build
+    needs: [build, infra]     # was: needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Check out the code (needed for the script)
