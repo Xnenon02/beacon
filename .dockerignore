@@ -1,0 +1,20 @@
+# Build output - regenerated every time, never belongs in the image
+**/bin/
+**/obj/
+**/publish/
+
+# Git and pipelines - not relevant to a running container
+.git/
+.gitignore
+.github/
+
+# The Bicep templates that deploy the app - not something the app itself needs
+infra/
+
+# IDE and machine-specific files - different on every computer, never relevant to the build
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.http
+.DS_Store
