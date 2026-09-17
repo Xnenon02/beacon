@@ -723,3 +723,173 @@ lesson day:**
 Net effect: rebuilding from scratch next lesson day is one command
 (`./scripts/deploy-infra.sh rg-clo25-namn-we`), with no manual key or role
 step left to forget.
+
+## Containerizing the app: ACR + Container Apps — lab 05, 2026-09-17
+
+### Docker Desktop doesn't work on this machine, and why that's fine
+
+`docker build` failed with `docker: command not found`; installing Docker
+Desktop failed at first launch with "Virtualization support not detected" —
+"Contact your IT admin," meaning virtualization is locked at a policy level
+on this school-managed machine, not just off in BIOS. Confirmed once and
+stopped there rather than fighting a setting that isn't mine to change.
+
+Correcting an assumption from earlier in the week: Docker's WSL2 backend
+does *not* require the full "Hyper-V" Windows feature — only the lighter
+"Virtual Machine Platform" component plus CPU-level virtualization
+(VT-x/AMD-V). It "just worked" in the past because that hardware setting was
+already on by default, not because nothing was needed. Here it's actively
+blocked, so the point is moot either way.
+
+**Consequence: every image in this course is built with `az acr build`
+instead of `docker build`.** Same `--file`, same trailing `.` build context,
+same result — the difference is only *where* the build runs (a build
+container in Azure, not a local Docker daemon), which is exactly why no
+local Docker is needed at all. `docker run -p 8080:8080` for a quick local
+smoke test has no real equivalent for the same reason — ACR is a registry,
+not a runtime, and `az acr run` is built for build-time steps, not for
+starting a long-lived container to curl against. Azure Container Instances
+(ACI) would be the closest match, but the course's own answer is simpler:
+skip the local step, deploy straight to Container Apps, and test the live
+URL instead.
+
+### What got built, and why (K1)
+
+`infra/container.bicep` grew in two passes, mirroring the hard ordering
+constraint (registry → image → environment/app — a Container App deploy
+fails outright if the image it points to doesn't exist yet):
+
+1. **Registry only** (`Microsoft.ContainerRegistry/registries`,
+   `acrclo25namnwe`) — deployed alone first. It already existed (created
+   manually before the template existed), so this `what-if` showed only
+   `~ Modify` (`adminUserEnabled: false → true`), no `+`.
+2. **Environment + Container App added** (`Microsoft.App/managedEnvironments`
+   `cae-clo25-namnwe`, `Microsoft.App/containerApps` `ca-clo25-namnwe`) once
+   `beacon:v1` was actually pushed. `what-if` showed exactly 2 `+` and
+   nothing else — the registry, unchanged, stayed `~`.
+
+`adminUserEnabled: true` on the registry is a deliberate, written-down
+trade-off: it's the simplest way for the Container App to pull the image
+(username + password), not the best one. The better way — managed identity
++ an `AcrPull` role assignment, no stored password at all — is the same
+upgrade path as OIDC for the pipeline, both slated for week 40.
+
+### Scaling and security as code (K2)
+
+`scale.minReplicas: 1`, `maxReplicas: 5`, `concurrentRequests: 20` —
+defaults kept as-is (the exercise meant to set these deliberately was
+missed), so the honest note here is *why* they're defaults rather than a
+chosen number: they're reasonable for a course project with no real traffic,
+and the thing to change first under real load would be `concurrentRequests`
+(lower it to scale out sooner) before touching the replica ceiling.
+
+Compare to App Service's scaling story: `sku.capacity: 3` there was a fixed
+worker count. Here it's a *range* plus a *rule* — Container Apps decides how
+many replicas to run, live, based on concurrent HTTP load. Same idea as
+`az appservice plan update --number-of-workers 3` from week 35, one level
+more automatic.
+
+`acr.listCredentials()` inside the template means the registry password is
+never typed anywhere, never lands in shell history, never touches Git — the
+template only describes *how* to fetch it at deploy time. `cpu:
+json(containerCpu)` exists because Bicep has no native decimal literal;
+skipping `json()` produces a compile error that doesn't explain itself.
+
+### Deploying it, and a real bug hit twice (F2, Komp1)
+
+`scripts/deploy-container.sh` is a copy of `deploy-infra.sh` differing in
+exactly three lines (`PARAM_FILE`, `TEMPLATE`, the `DEPLOYMENT_NAME` prefix)
+— verified with `diff -u`, not by eye. It inherited the role-assignment
+self-healing block from week 37 unchanged, which is why it isn't part of the
+diff at all.
+
+**The Git Bash path-mangling bug (first hit in week 37 on
+`health_check_path`) struck a third time**, this time on the self-healing
+block's `--scope "/subscriptions/..."` argument: without
+`MSYS_NO_PATHCONV=1` exported, the deployment itself succeeded but the
+role-check step failed with `MissingSubscription` — the leading slash got
+rewritten into a Windows path again. Same root cause, third different
+symptom (`health_check_path` → `az ad sp create-for-rbac --scopes` →
+this). Worth writing down as a pattern, not three separate bugs: *any*
+`az` argument starting with a single `/`, run from Git Bash on Windows, is
+suspect until proven otherwise.
+
+**A second, unrelated failure**: pushing today's changes triggered *both*
+pipelines (container track's `scripts/` change isn't excluded by either
+workflow's `paths-ignore`), and the App Service pipeline's health check
+failed with ten straight `404`s. Direct `curl` moments later returned `200`
+— the `infra` job's Bicep deploy had reset `alwaysOn`/health-check
+configuration, restarting the app, and the pipeline's ~45-second retry
+budget ran out just before the app finished restarting. Re-running the
+failed job confirmed it: a false negative from timing, not a real
+regression — the same class of gotcha as the `000`/`503` responses
+documented in Step 4 above, just manifesting as `404` this time.
+
+### Rollout behavior observed (K4)
+
+Pushed a trivial visible change (`/api/status` response text) through the
+Plan A pipeline and inspected `az containerapp revision list --all`
+afterward:
+
+```
+Rev                       Active    Traffic
+------------------------  --------  -------
+ca-clo25-namnwe--x6bubwc  False     0
+ca-clo25-namnwe--0000001  True      0
+ca-clo25-namnwe--0000002  True      100
+```
+
+The old revisions were **not deleted** — they still exist, just deactivated
+or at 0% traffic, while the newest one holds 100%. This is Container Apps'
+built-in rolling-style behavior: nothing was configured for it, it's the
+default. Compared to week 36's rolling/blue-green/canary distinctions: this
+reads as rolling (one new revision fully replaces traffic, old ones kept
+around rather than both serving simultaneously as blue-green would, and
+without the gradual traffic-split a canary would use) — though Container
+Apps *can* do traffic-splitting across revisions manually if asked to
+(Fördjupning 10 territory).
+
+**The honest limit of the health check here, same shape as week 36's
+lesson**: a green `Health check after deployment` step proves the app
+answers `200` — not that it's the *new* revision answering. If a bad
+revision failed to start, Container Apps would simply keep serving the old
+one at 100% traffic, and the health check would still pass. The only way to
+see that is `revision list`, not the pipeline's own output.
+
+### Two pipelines, one test, run twice (Komp1 reflection)
+
+`dotnet test` now runs in both `deploy.yml` and `deploy-container.yml`,
+independently. Real duplication, but the safer default: if it lived in only
+one, whichever pipeline skipped it would be the one capable of shipping code
+whose tests fail — a test that gates one deploy path and not the other is
+worse than no test, since it teaches that tests are a step in a file rather
+than a gate before any release. The actual fix for the duplication — a
+shared `build`/`test` job, or a reusable workflow both call — is known and
+not built here; recognizing the option is the point, not implementing it
+today.
+
+### Tearing down four resources instead of one
+
+`deploy-infra.sh` only ever knew about the App Service track. Today added a
+registry, a Container Apps environment, and a container app — four resources
+across two scripts, in a strict order (registry before image before app).
+`scripts/provision-all.sh` exists purely to encode that order as a file
+instead of a memory: it calls `deploy-infra.sh`, creates the registry
+directly (since `container.bicep` can't yet — the app inside it needs an
+image that doesn't exist yet), builds the image, then calls
+`deploy-container.sh`. No new logic, just the missing two commands plus the
+two scripts already written, chained. Checked with `bash -n` before ever
+being run for real, since it's the one script in this course committed and
+then torn down out from under before it was ever exercised.
+
+Teardown used `properties.provisioningState` instead of `az group exists`
+this time — a Container Apps environment can take upward of ten minutes to
+empty, and `exists` would just report `true` the whole time with no signal
+that anything is actually progressing. `provisioningState` answers
+`Deleting` mid-flight instead of leaving that ambiguous.
+
+Net effect for next lesson day: `./scripts/provision-all.sh rg-clo25-namn-we
+acrclo25namnwe` first thing, before anything else — the Container Apps
+environment is the slowest thing to create in the whole course, so starting
+it early and reading/writing while it provisions is the way to spend that
+wait, not watching it.
