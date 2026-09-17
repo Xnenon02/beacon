@@ -17,7 +17,7 @@ app.UseStaticFiles();
 app.MapGet("/api/status", () => new
 {
     app = "Beacon",
-    status = "running"
+    status = "running (container pipeline test)"
 });
 
 // Health check. Used by App Service (week 35), by health-check.sh (week 36)
