@@ -42,6 +42,9 @@ resource plan 'Microsoft.Web/serverfarms@2025-03-01' = {
 resource app 'Microsoft.Web/sites@2025-03-01' = {
   name: appName
   location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
   kind: 'app,linux' // exactly the "kind" read off in Step 1
   properties: {
     serverFarmId: plan.id
