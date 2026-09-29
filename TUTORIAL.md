@@ -893,3 +893,269 @@ acrclo25namnwe` first thing, before anything else — the Container Apps
 environment is the slowest thing to create in the whole course, so starting
 it early and reading/writing while it provisions is the way to spend that
 wait, not watching it.
+
+## Secrets and identity: Key Vault + OIDC — lab 06, 2026-09-29
+
+Started the day with the usual teardown recovery (`provision-all.sh`, Del 0),
+then built the security layer on top: a managed identity for the app, a Key
+Vault it reads from, and passwordless login for both pipelines. Everything
+below was done for real against `rg-clo25-namn-we` and torn down at the end
+of the day.
+
+### Del 0 — rebuilding, and two failures that weren't in the script (Komp1)
+
+`./scripts/provision-all.sh rg-clo25-namn-we acrclo25namnwe` (the `-we`
+suffix is this repo's naming, not the `rg-clo25-namn` used in the lab text).
+
+1. **The Git Bash path-mangling bug, fourth symptom.** The script printed
+   `Done. App URL:` and then died with `MissingSubscription` inside the
+   role-assignment block at the end of `deploy-infra.sh` — the
+   `--scope "/subscriptions/..."` argument got rewritten into a Windows path
+   again. Fixed by exporting `MSYS_NO_PATHCONV=1` and re-running (the script
+   is idempotent, so step 1 simply ran again). Two things made this easy to
+   miss: `provision-all.sh ... | tee log` reported **exit code 0** even though
+   the script had failed (the exit code was `tee`'s, not the script's), and
+   steps 2–4 never ran. The pattern from lab 05 holds: any `az` argument
+   starting with a single `/` in Git Bash is suspect.
+2. **The pipeline could not log in: `No subscriptions found`.** Cause: the
+   pipeline identity's `Contributor` role is scoped to the resource group and
+   dies with it, and the block that re-grants it was exactly the part that had
+   crashed in (1). Fixing (1) granted the role — but the re-run of the
+   pipeline *immediately afterwards* still failed the same way, because a new
+   role assignment needs a minute or two to propagate. Confirmed the role
+   existed with `az role assignment list`, waited, re-ran: green. Lesson: a
+   fresh role assignment plus an instant login is a race, and the error
+   (`No subscriptions found`) says nothing about propagation.
+
+A third, harmless one: the first `deploy` run failed its own health check
+(`FAILED: app never responded 200 after 10 attempts`) on a brand-new app;
+`curl` seconds later returned 200. Cold start on a just-created app, same
+false-negative class as the `404`s in lab 05. A re-run of the failed job was
+green.
+
+### A managed identity for the app, and a Key Vault (K1, K2)
+
+`identity: { type: 'SystemAssigned' }` on the web app in `infra/main.bicep`
+(three lines, directly after `location`). `what-if` showed `~ Modify` and did
+**not** list the identity at all — what-if simply doesn't render it, so the
+proof is `az webapp identity show`, which returned a `principalId`. Committed
+straight away: without the change in the template, the identity would exist
+only in the running app and vanish the next time `provision-all.sh` rebuilds
+the app from the checked-in template.
+
+`infra/security.bicep` creates the vault and one secret:
+
+- **`@secure()` on `secretValue`** — without it the value would sit in clear
+  text in the deployment history. `what-if` showed `properties.value:
+  "*******"`, which is the visible proof.
+- **`existing` on the app resource** — same keyword as the registry in
+  `container.bicep`: "it exists, don't create it". It is what lets the
+  template read `app.identity.principalId`.
+- **Two access policies:** the app gets `get`, `list`; I get `get`, `list`,
+  `set`. The app must never be able to write a secret. Verified with
+  `az keyvault show ... accessPolicies` and by comparing the first id to
+  `$APP_PRINCIPAL_ID` — it matched.
+- **`readEnvironmentVariable('SECRET_VALUE')` in `security.bicepparam`** — the
+  parameter file says *where* the value comes from, not *what* it is, so it
+  can be committed. If the variable is missing, the deploy stops with BCP427
+  before anything reaches Azure.
+- The secret value never appeared in a command line. The lab's way is
+  `read -rs` (so it isn't echoed or stored in shell history), with `printf`
+  for the prompt because `read -p` means something else in zsh. A test value
+  (`demo-value-1`) was used, since the value gets printed on screen when
+  verifying access.
+
+**Why access policies and not RBAC (`enableRbacAuthorization: false`) —
+a known, deliberate limitation (K2, Komp2).** RBAC is what Microsoft
+recommends today, but it needs the right to create role assignments *per
+identity*, and role assignments die with the resource group — the same
+problem as the pipeline's `Contributor`. Access policies are declared inside
+the Key Vault resource itself and work with plain `Contributor`. Trade-off
+accepted: less granular and older model, but it works with the permissions
+this subscription actually grants and doesn't add another thing to re-grant
+after every teardown. With the right to assign roles, RBAC would be the
+better choice.
+
+### Letting the app read the secret (K2)
+
+```
+MY_SECRET = @Microsoft.KeyVault(SecretUri=https://kv-clo25-namn-we.vault.azure.net/secrets/demo-secret)
+```
+
+The app setting holds a *reference*, not the secret. The app reads the
+environment variable `MY_SECRET` as usual; App Service fetches the value from
+Key Vault with the app's managed identity at start-up. The URI has no version
+on the end, so it always points at the latest — which is what makes rotation
+possible without redeploying.
+
+Checking that the setting *exists* proves nothing (a perfect-looking
+reference can still fail to resolve, and the app would then get the literal
+string `@Microsoft.KeyVault(...)`). The proof is asking the platform:
+
+```
+az rest --method get --url "https://management.azure.com<app-id>/config/configreferences/appsettings?api-version=2022-03-01"
+```
+
+→ `MY_SECRET  Resolved`. Other statuses (`SecretNotFound`,
+`AccessToKeyVaultDenied`, `VaultNotFound`) name the exact failure.
+
+What is *not* anywhere in the chain from Key Vault to the app: no password in
+the code, the Bicep, GitHub secrets, the app setting, or the shell history.
+The app proves who it is with its identity; Key Vault hands the value to that
+identity only.
+
+**Known limitation (written down on purpose):** the setting was applied with
+`az webapp config appsettings set`, not in Bicep. Two reasons: `security.bicep`
+is only deployed in this lab (a reference in `main.bicep` would point at a
+vault that doesn't exist after a teardown), and `appSettings` in a template
+*replaces all* settings the app has — a template that owns one setting must
+own all of them, and everything set by CLI would vanish on the next deploy
+(the same reason `main.bicep` declares no `appSettings` since lab 04). The
+consequence is that `MY_SECRET` does **not** come back after a rebuild: the
+app answers `200` on `/health`, the pipeline is green, and the reference is
+silently gone (`az webapp config appsettings list` returns `[]`). It is a
+conscious deviation from "everything as code"; next step would be moving the
+app settings into the template.
+
+### OIDC for the pipelines (F2, Komp1, Komp2)
+
+Before: both workflows logged in with `AZURE_CREDENTIALS`, a service
+principal password stored as a GitHub secret. After: GitHub vouches for every
+run ("this is a job in repo X on branch `main`") and Azure trusts the
+voucher — nothing stored anywhere that would still work tomorrow. Password =
+a keycard that works anywhere until someone changes the lock; OIDC = a visitor
+pass issued per run and valid for minutes.
+
+What was built:
+
+1. **A new identity** `gh-clo25-namn-we` (`az ad app create` +
+   `az ad sp create`). Checked with `az ad app list` first, so it wasn't
+   created twice. This lives in Entra ID, not in the resource group, so it
+   survives teardown.
+2. **`Contributor` on the resource group only**, not the subscription — same
+   least-privilege reasoning as lab 04: the role dies with the group, and the
+   role-grant block at the end of `deploy-infra.sh` re-creates it. That's why
+   `SP_NAME` in `deploy-infra.sh` had to be changed to the new identity.
+   I changed it in `deploy-container.sh` too (it has a copy of the same block
+   and would otherwise have granted the role to the old identity).
+3. **A federated credential** (`github-main`) with `issuer
+   https://token.actions.githubusercontent.com`, audience
+   `api://AzureADTokenExchange` and the **subject**:
+   `repo:Xnenon02@228689539/beacon@1339932954:ref:refs/heads/main`.
+   The subject is the whole credential: only runs GitHub vouches for with
+   exactly that string can use the identity — this repo, this branch, nothing
+   else. Note the numeric ids in it: repos created after 2026-07-15 have the
+   account and repo id baked in, while most documentation (including
+   Microsoft Learn) shows the older form without them. Typing it by hand
+   would give `AADSTS700213`. So it was **asked from GitHub**
+   (`gh api repos/{owner}/{repo}/actions/oidc/customization/sub`), not typed.
+4. **Three GitHub *variables*, not secrets** (`AZURE_CLIENT_ID`,
+   `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) — they are identifiers, not
+   passwords. Setting them as secrets works too but makes logs unreadable and
+   blurs the line between an id and a key. They were piped straight from `az`
+   to `gh variable set` so they never went through the screen or clipboard.
+   (The repo also has older *secrets* with similar names from earlier labs;
+   `vars.` and `secrets.` are separate namespaces, so no clash.)
+5. **Both workflow files, in one commit:** `permissions: id-token: write,
+   contents: read` at the top (once `permissions` is set everything else
+   defaults to none, so `contents: read` is needed for `actions/checkout`),
+   and the `creds:` line replaced by `client-id` / `tenant-id` /
+   `subscription-id` in **all four** login steps (`deploy.yml`: `infra`,
+   `deploy`; `deploy-container.yml`: `build-and-push`, `deploy`). Verified
+   with `grep -n AZURE_CREDENTIALS .github/workflows/*.yml` → no output.
+
+Result after pushing to `main`: both pipelines log `Azure CLI login succeeds by
+using OIDC.` and the log shows the exact `subject claim` GitHub sent, which is
+what to compare with the credential if a login ever fails. One
+`No subscriptions found` on the container pipeline's first run — same
+role-propagation race as in Del 0, not an OIDC problem (no `AADSTS` error;
+the token exchange itself had worked) — green after `gh run rerun --failed`.
+
+**`AZURE_CREDENTIALS` is deliberately still there:**
+```
+AZURE_CREDENTIALS behålls tills OIDC bevisats över en rivning,
+inte bara över en push.
+```
+OIDC has been shown to work on a push while the resource group was up. It has
+*not* yet been shown to work on an environment rebuilt from zero with
+`provision-all.sh` and both pipelines green. Deleting the secret first would
+leave no fallback if the role assignment turned out not to come back. Once
+that has been seen: `gh secret delete AZURE_CREDENTIALS`. The other old
+secrets (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZUREAPPSERVICE_*`) are
+also unused by the workflows now and can go at the same time.
+
+### AcrPull instead of the registry password — built, then reverted (Del 2b, K2)
+
+Optional part, done to see it work and undone the same day (the lab says so
+itself). Steps: system-assigned identity on the Container App
+(`az containerapp identity assign`), role `AcrPull` on the registry
+(two-minute wait for propagation), then in `container.bicep`: `identity:
+{ type: 'SystemAssigned' }` on the app, `identity: 'system'` in the
+`registries` entry instead of `username`/`passwordSecretRef`, and the
+`secrets` block plus the unused `registryPasswordSecretName` variable removed.
+
+Verified with `az containerapp show`: `"identity": "system"`, empty
+`username`, `"secrets": null`, `/health` → 200. The Container App pulled its
+image with no password anywhere.
+
+**Why it is better than the admin password:** the admin user is one shared
+username/password that can push, pull and delete for the whole registry; it
+can leak, has to be rotated and lives in the template's output/secret store.
+`AcrPull` gives *only this app* the right to *only pull* from *only this
+registry*, and there is nothing to leak or rotate.
+
+**Why it was reverted:** the `AcrPull` assignment sits on the registry, the
+registry sits in the resource group, and the group is torn down. After the
+next `provision-all.sh` the new registry and the new app identity would have no
+role: no image pull, no active revision, `deploy-container.yml` red — and the
+container track must work for a passing grade. Reverted with
+`git restore infra/container.bicep` (the change was never committed) and a
+re-deploy; afterwards `identity: None`, secret `acr-password` back, `/health`
+200. The orphaned role assignment on the registry does no harm and disappears
+with the group.
+
+### What is left as secrets, and what would replace it (Komp2 summary)
+
+| Where | What | Replaced by |
+|---|---|---|
+| GitHub secret `AZURE_CREDENTIALS` | service principal password | OIDC (built, waiting to be proven over a teardown) |
+| Registry admin user | username + password the Container App pulls with | managed identity + `AcrPull` (built and verified, reverted) |
+| App setting `MY_SECRET` | *not* a secret — a Key Vault reference | already the target design |
+
+### Teardown notes (Del 4)
+
+`az group delete --name rg-clo25-namn-we --yes --no-wait`, followed by
+`az group show --query properties.provisioningState` (`Deleting` = in
+progress, `Borta` = gone). Same reasoning as lab 05: `az group exists` says
+`true` until the very end.
+
+What **survives** a teardown (lives in Entra ID, not the group): the OIDC
+identity `gh-clo25-namn-we` and its federated credential. What is **lost**:
+
+- the role assignments (pipeline identity `Contributor`, the orphaned
+  `AcrPull`) — the first is re-granted by the block at the end of
+  `deploy-infra.sh`, which is why `SP_NAME` must point at `gh-clo25-namn-we`
+  (checked with `grep -n 'SP_NAME=' scripts/deploy-infra.sh`; if it still says
+  `sp-clo25-namn-we`, the OIDC identity gets no role and *both* pipelines fail
+  with `AuthorizationFailed` after a green login step);
+- `MY_SECRET` (see the known limitation above);
+- the Key Vault. `provision-all.sh` does **not** rebuild it, on purpose: soft
+  delete keeps the name reserved for 7 days after deletion
+  (`softDeleteRetentionInDays: 7`, the minimum; soft delete can't be turned
+  off), and a step that can't be repeated is a bad step in a rebuild script.
+  Scheduled purge for `kv-clo25-namn-we`: 2026-10-06 (from
+  `az keyvault list-deleted`). To bring it back before then, use a new name
+  (e.g. `kv-clo25-namn-we-2`) in `security.bicepparam`, deploy
+  `security.bicep`, and set `MY_SECRET` again. `az keyvault recover` is the
+  right answer in a real project, but it needs subscription-level rights, the
+  resource group must exist first, and the recovered vault comes back with
+  the *old* app's identity in its access policies — the new app would get
+  `Forbidden` from a vault that looks healthy.
+
+What still matters for grading is the write-up above, not a running vault: the
+moment was done, is explained, and the template is in the repo.
+
+**Two Git Bash reminders** for anyone re-running this on Windows: export
+`MSYS_NO_PATHCONV=1` in every new terminal before touching `--scope`
+arguments, and don't trust the exit code of `script | tee log` — check the log
+for the last expected line (`Both tracks are up.`).
