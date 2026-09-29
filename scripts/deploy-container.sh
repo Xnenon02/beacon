@@ -19,7 +19,7 @@ fi
 RESOURCE_GROUP="${1:?Provide the resource group as the first argument}"
 PARAM_FILE="${2:-infra/container.bicepparam}"
 LOCATION="${LOCATION:-westeurope}"
-SP_NAME="${SP_NAME:-sp-clo25-namn-we}"
+SP_NAME="${SP_NAME:-gh-clo25-namn-we}"
 TEMPLATE="infra/container.bicep"
 
 echo "Template:       $TEMPLATE"
