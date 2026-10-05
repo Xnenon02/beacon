@@ -13,7 +13,7 @@ Everything is created with Bicep and deployed by GitHub Actions, which sign in t
 
 ## Start here
 
-**[TUTORIAL.md](TUTORIAL.md)** is the documentation. It explains what was built and why, and how to rebuild all of it step by step from an empty repository and an empty Azure subscription: services, scaling and load balancing, deployment strategy, security design, alternatives considered, known limitations, and troubleshooting.
+**[docs/TUTORIAL.md](docs/TUTORIAL.md)** is the documentation. It explains what was built and why, and how to rebuild all of it step by step from an empty repository and an empty Azure subscription: services, scaling and load balancing, deployment strategy, security design, alternatives considered, known limitations, and troubleshooting.
 
 ## Run it locally
 
@@ -33,4 +33,4 @@ curl http://localhost:5001/health          # OK
 | `scripts/` | `provision-all.sh` (build everything from nothing), `deploy-infra.sh`, `deploy-container.sh`, `health-check.sh` |
 | `.github/workflows/` | the two pipelines |
 
-The Azure resources are deleted at the end of each working day, so the apps are not running at any given moment. The repository and `TUTORIAL.md` are what matter; `./scripts/provision-all.sh` brings the environment back (see section A10 of the tutorial).
+The Azure resources are deleted at the end of each working day, so the apps are not running at any given moment. The repository and `docs/TUTORIAL.md` are what matter; `./scripts/provision-all.sh` brings the environment back (see section A10 of the tutorial).

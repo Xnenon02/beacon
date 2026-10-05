@@ -52,11 +52,19 @@ Both workflows sign in to Azure with **OIDC**: GitHub issues a short-lived token
 | Term | Meaning |
 |---|---|
 | web track / container track | the App Service deployment / the Container Apps deployment |
-| instance | one worker machine of the App Service plan (web track) |
-| replica | one running copy of the container in Container Apps (container track) |
-| registry | Azure Container Registry (ACR), where container images are stored |
-| revision | an immutable version of a Container App, created whenever its template (for example the image) changes |
-| pipeline identity | the Entra ID app registration `gh-clo25-<name>-we` that GitHub Actions signs in as |
+| plan | the App Service plan: the machines the web app runs on; instance count and tier are set on the plan, not on the app |
+| instance | a running copy of the app on one of the plan's machines (web track) |
+| replica | a running copy of a revision (container track); the container equivalent of an instance |
+| scale out / scale up | adding instances or replicas (horizontal) / moving to a larger tier (vertical) |
+| load balancing | distributing requests across instances or replicas; built into both services |
+| stateless | the app keeps nothing in local memory between requests; the prerequisite for running several copies |
+| image / container / registry | the built, immutable package / a running copy of an image / Azure Container Registry (ACR), where images are stored |
+| revision | an immutable version of a Container App (image plus configuration); a new image creates a new revision |
+| in-place deployment | new code is uploaded and the app restarts (what the web pipeline does) |
+| rolling update | new copies gradually replace the old ones, so something always answers (what Container Apps does, revision by revision) |
+| pipeline identity | the Entra ID app registration `gh-clo25-<name>-we` (with its service principal) that GitHub Actions signs in as |
+| role assignment | the link between an identity, a role and a scope; a role assignment on a resource group disappears with the group |
+| managed identity | an identity created and managed by Azure for a resource, with no stored password (here: system-assigned, so it lives and dies with the web app) |
 | resource group | `rg-clo25-<name>-we`, the single container for every Azure resource below |
 | teardown | deleting the resource group, which deletes everything inside it |
 
@@ -67,7 +75,7 @@ Both workflows sign in to Azure with **OIDC**: GitHub issues a short-lived token
 | `src/Beacon.Api/` | the application (`Program.cs`, `Steam/SteamClient.cs`, `wwwroot/`) and its `Dockerfile` |
 | `tests/Beacon.Tests/` | xUnit tests (health endpoint, root page) |
 | `infra/main.bicep` | web track: App Service plan and web app |
-| `infra/container.bicep` | container track: registry, Container Apps environment, container app |
+| `infra/container.bicep` | container track: registry, Container Apps environment, Container App |
 | `infra/security.bicep` | Key Vault with access policies and one secret |
 | `infra/*.bicepparam` | the parameter file belonging to each template |
 | `scripts/provision-all.sh` | builds the whole environment from nothing, in the order that works |
@@ -147,7 +155,7 @@ export RG=rg-clo25-$NAME-we            # resource group
 export PLAN=asp-clo25-$NAME-we         # App Service plan
 export APP=app-clo25-$NAME-we          # web app (becomes <APP>.azurewebsites.net)
 export ACR=acrclo25${NAME}we           # container registry: letters and digits only
-export CAPP=ca-clo25-${NAME}we         # container app
+export CAPP=ca-clo25-${NAME}we         # Container App
 export IDENT=gh-clo25-$NAME-we         # pipeline identity in Entra ID
 export VAULT=kv-clo25-$NAME-we         # key vault (24 characters at most)
 
@@ -183,7 +191,7 @@ gh repo create beacon --public --source=. --remote=origin
 
 ## A5. Create the pipeline identity (one time)
 
-The pipelines need an identity in Azure. Instead of a password, it gets a **federated credential**: Azure will trust a token only if GitHub issued it for exactly this repository and the `main` branch.
+The pipelines need an identity in Azure. Instead of a password, it gets a **federated credential**: Azure will trust a token only if GitHub issued it for exactly this repository and the `main` branch. That is also why a fork of someone else's repository cannot reuse their identity: the subject contains the account and repository ids, which are different for every repository.
 
 First check whether it already exists (it survives teardown, so you only create it once):
 
@@ -242,7 +250,7 @@ One command builds both tracks, in the order Azure requires:
 | 1/4 | `deploy-infra.sh`: creates the resource group, deploys `infra/main.bicep` (App Service plan with 3 instances, web app), grants the pipeline identity `Contributor` on the group | everything else lives in the group |
 | 2/4 | `az acr create`: the registry | an image cannot be pushed to a registry that does not exist |
 | 3/4 | `az acr build`: builds the Dockerfile in Azure and pushes `beacon:v1` | a Container App that points at a missing image fails to deploy |
-| 4/4 | `deploy-container.sh`: deploys `infra/container.bicep` (the registry again, now unchanged, plus the Container Apps environment and the container app) | needs the image from step 3 |
+| 4/4 | `deploy-container.sh`: deploys `infra/container.bicep` (the registry again, now unchanged, plus the Container Apps environment and the Container App) | needs the image from step 3 |
 
 It takes 10 to 15 minutes and ends with `Both tracks are up.` Step 4 is the slow one: the Container Apps environment normally takes 3 to 5 minutes but once took 14 (its state is `Waiting` meanwhile; `az containerapp env show -g "$RG" -n cae-clo25-${NAME}we --query properties.provisioningState -o tsv`). If your terminal gives up before the script does, the deployment keeps running in Azure; check `az deployment group list -g "$RG" -o table` and, once it says `Succeeded`, you are done with this step. Check what exists:
 
@@ -251,7 +259,7 @@ az resource list -g "$RG" --query "[].{Name:name, Type:type}" -o table
 az role assignment list -g "$RG" --assignee "$CLIENT_ID" -o table    # Contributor, scope = the group
 ```
 
-You should see the plan, the web app, the registry, the Container Apps environment and the container app, and one `Contributor` assignment for the pipeline identity. The web app is **empty** at this point (the infrastructure exists, the code does not); the pipeline deploys the code next.
+You should see the plan, the web app, the registry, the Container Apps environment and the Container App, and one `Contributor` assignment for the pipeline identity. The web app is **empty** at this point (the infrastructure exists, the code does not); the pipeline deploys the code next.
 
 ## A7. Deploy the application with the pipelines
 
@@ -329,7 +337,7 @@ az deployment group create \
   --query properties.outputs -o json
 ```
 
-Point an app setting at the secret. The setting holds a **reference**, not the value; App Service fetches the value from Key Vault with the app's identity when the app starts. The URI has no version, so it always resolves to the latest one:
+Point an app setting at the secret. The setting holds a **reference**, not the value; App Service fetches the value from Key Vault with the app's identity when the app starts. The URI has no version, so it always resolves to the latest one (according to the course material, the resolved value is cached for up to a day, so a rotated secret reaches the app with that delay; this was not measured):
 
 ```bash
 az webapp config appsettings set -g "$RG" -n "$APP" \
@@ -381,7 +389,7 @@ gh workflow run deploy-container.yml
 | **App Service** (Linux, B1) | web track | A managed platform for web apps: no operating system to patch, a built-in load balancer across instances, a health check setting, deployment from a zip. B1 is the cheapest tier that can run more than one instance (the free and shared tiers cannot scale out), which is what the assignment requires. |
 | **Container Apps** | container track | Runs containers without running a cluster. Gives revisions, HTTPS ingress with load balancing across replicas, and request-based autoscaling out of the box, which is exactly the scaling story the web track lacks on B1. |
 | **Container Registry** (Basic) | image storage | The Container App needs a place to pull the image from. Basic is enough: one image, no geo-replication. |
-| **Key Vault** | secrets | One place to keep a secret and control who may read it, so no secret has to be copied into app settings or pipelines. |
+| **Key Vault** | secrets | One place to keep a secret and control, per identity, who may read it. Compared with a plain app setting it gives a single point of change, rotation without redeploying the app, and an audit log, so no secret has to be copied into app settings or pipelines. |
 | **Entra ID** (app registration with federated credential) | pipeline identity | Lets GitHub Actions deploy without a stored password (B4). |
 | **Bicep** | infrastructure as code | Azure's own declarative language: no extra tool or state file to manage, and `what-if` shows the change before anything happens. |
 | **GitHub Actions** | CI/CD | The code already lives on GitHub, it is free for public repositories, and it is what the runner image and scripts here are written for. |
@@ -392,19 +400,19 @@ gh workflow run deploy-container.yml
 
 **Web track: fixed capacity, platform load balancing.** The plan runs `3` instances (`instanceCount` in `infra/main.bicepparam`, the maximum B1 allows, set by `sku.capacity` in the template). App Service's front end spreads requests across the instances. This is **manual scale-out**: B1 supports setting the number of instances by hand (`az appservice plan update --number-of-workers`, or changing the parameter and redeploying), but rule-based autoscale needs the Standard tier or higher. Setting the count in the template means it is a decision recorded in Git instead of something someone once typed in a terminal. One detail to know: **ARR affinity** is switched on (`clientAffinityEnabled` is `true` on the deployed app; the template does not touch it). It is a cookie that pins a client to one instance, so load is spread per client rather than per request; for a stateless API it could be switched off.
 
-**Container track: a range and a rule.** The container app runs between `minReplicas: 1` and `maxReplicas: 5`, with an `http-scaling` rule of `concurrentRequests: 20`: when the average number of concurrent requests per replica passes 20, Container Apps starts another replica, up to five, and removes them again when the load drops. Ingress distributes requests across the running replicas. The minimum of 1 avoids cold starts (setting it to 0 would scale to zero and cost nothing when idle, at the price of a delay on the first request). The numbers are reasonable starting values for a small stateless API; they were **not load-tested**, so treat them as a starting point, not a measurement. Under a real traffic spike this is the track that reacts on its own; the web track would need a manual `--number-of-workers` change or a move to Standard.
+**Container track: a range and a rule.** The Container App runs between `minReplicas: 1` and `maxReplicas: 5`, with an `http-scaling` rule of `concurrentRequests: 20`: when the average number of concurrent requests per replica passes 20, Container Apps starts another replica, up to five, and removes them again when the load drops. Ingress distributes requests across the running replicas. The minimum of 1 avoids cold starts (setting it to 0 would scale to zero and cost nothing when idle, at the price of a delay on the first request). The numbers are reasonable starting values for a small stateless API; they were **not load-tested**, so treat them as a starting point, not a measurement. Under a real traffic spike this is the track that reacts on its own; the web track would need a manual `--number-of-workers` change or a move to Standard.
 
 **State: each instance and replica has its own memory.** `SteamClient` caches Steam responses in `IMemoryCache` (search results 5 minutes, app details 6 hours, player counts 60 seconds). That cache exists *per instance or replica*: with 3 instances and up to 5 replicas there are up to 8 independent caches that do not know about each other. Effects: more calls to Steam than a shared cache would make, and two requests can briefly show different player counts. That is acceptable here because the cached data is read-only and non-critical (a stale player count is a freshness trade-off, not a wrong result). The same problem would be a real bug for anything the app *writes*: a counter or a file on disk would also exist once per instance. Shared state would have to move to an external store such as a database or a shared cache, which is out of scope for this assignment.
 
 ## B3. Deployment strategy
 
-**Web track: in-place deployment to a single production site, with a health gate.** `azure/webapps-deploy` uploads the build output as a package and App Service restarts the site on it. The pipeline order is: `infra` and `build` in parallel (neither depends on the other), `deploy` only after both succeed (`needs: [build, infra]`, so code is never deployed to a plan that does not exist yet), then `scripts/health-check.sh` retries `/health` for about 45 seconds and fails the run if the app never answers `200`. Blue-green with a slot swap is the usual alternative, but **deployment slots need the Standard tier**, which B1 is not. The health check on the site additionally makes App Service take an instance that keeps failing `/health` out of the load-balancer rotation.
+**Web track: in-place deployment to a single production site, with a health gate.** `azure/webapps-deploy` uploads the build output as a package and App Service restarts the site on it: that is an **in-place deployment**, and it is the strategy the pipeline implements. (The course material also describes App Service as replacing the running code instance by instance, which would make the restart a rolling one on the platform's side. The pipeline does not control or measure that; what it controls is the single upload and the health gate below.) The pipeline order is: `infra` and `build` in parallel (neither depends on the other), `deploy` only after both succeed (`needs: [build, infra]`, so code is never deployed to a plan that does not exist yet), then `scripts/health-check.sh` retries `/health` for about 45 seconds and fails the run if the app never answers `200`. Blue-green with a slot swap is the usual alternative, but **deployment slots need the Standard tier**, which B1 is not. The health check on the site additionally makes App Service take an instance that keeps failing `/health` out of the load-balancer rotation.
 
-**Container track: a new immutable revision per commit.** Each push builds one image tagged with the commit SHA (and `latest`), then `az containerapp update --image <registry>/beacon:<sha>` creates a new revision. Container Apps runs in *single-revision mode* (the default; `az containerapp show --query properties.configuration.activeRevisionsMode` returns `Single`): all traffic goes to the latest revision, the new revision is brought up before the old one is stopped, and the old one stays in the revision list as `Stopped` with no replicas. That is a rolling replacement without downtime, and a rollback is another `az containerapp update` with an older SHA (older images stay in the registry because every build has its own tag). The **commit SHA as tag is the most important line of the workflow**: Container Apps only creates a revision when the template changes, so pushing a new image to the same `:latest` tag would change nothing and the pipeline would go green while the app kept running old code.
+**Container track: a new immutable revision per commit.** Each push builds one image tagged with the commit SHA (and `latest`), then `az containerapp update --image <registry>/beacon:<sha>` creates a new revision. Container Apps runs in *single-revision mode* (the default; `az containerapp show --query properties.configuration.activeRevisionsMode` returns `Single`): all traffic goes to the latest revision, the new revision is brought up before the old one is stopped, and the old one stays in the revision list as `Stopped` with no replicas. That is a **rolling update**, revision by revision, without downtime, and a rollback is another `az containerapp update` with an older SHA (older images stay in the registry because every build has its own tag). The **commit SHA as tag is the most important line of the workflow**: Container Apps only creates a revision when the template changes, so pushing a new image to the same `:latest` tag would change nothing and the pipeline would go green while the app kept running old code.
 
 **Why the pipelines own different things.** The web pipeline re-applies its Bicep template on every push (`infra` job): the template does not depend on the code, so re-applying is idempotent and keeps drift out. The container pipeline does **not** run `container.bicep`, because that template pins `containerImage` to `:v1`; running it on every push would roll the app back to `v1` each time. So the image is owned by the pipeline (`az containerapp update`), and the template is only run by a person through `deploy-container.sh` when the *infrastructure* changes (scaling, port, size). Running that script after a deployment does roll the app back to `v1` until the next push. Two things deciding which image runs is a known weakness (B6).
 
-**The limit of the health check.** After a Container App rollout the check proves that *an* instance answers `200`, not that the *new revision* does: if the new revision failed to start, Container Apps keeps routing to the old one and the check still passes. The only way to see that is `az containerapp revision list`, which is why A8 compares the running image tag to the commit.
+**The limit of the health check.** After a Container App rollout the check proves that *a* replica answers `200`, not that the *new revision* does: if the new revision failed to start, Container Apps keeps routing to the old one and the check still passes. The only way to see that is `az containerapp revision list`, which is why A8 compares the running image tag to the commit.
 
 ## B4. Security design
 
@@ -413,7 +421,7 @@ gh workflow run deploy-container.yml
 | **Pipeline authentication** | OIDC with a federated credential on `gh-clo25-<name>-we`. The pipelines use no secret at all (no workflow contains `secrets.`); only three identifiers (client, tenant, subscription id) are read from repository *variables*. | A stored password works anywhere, for anyone who obtains it, until someone rotates it. A federated token is issued per run, lives for minutes, and Azure only accepts it for the exact subject `repo:<owner>/<repo>:ref:refs/heads/main`: this repository, this branch, nothing else. A pull request or another branch cannot sign in. |
 | **Least privilege** | The identity has `Contributor` on **one resource group**, not on the subscription. The workflows request only `id-token: write` and `contents: read`. | If the pipeline were compromised it could change this one group, not the subscription. The price: a role assignment belongs to its scope and **is deleted with the resource group**, so after every teardown it must be granted again. The scripts do that (the block at the end of `deploy-infra.sh`). The pipeline cannot re-grant it for itself, which is correct: an identity that could assign its own roles would defeat the purpose. |
 | **Application secrets** | The web app has a system-assigned managed identity; Key Vault grants that identity `get` and `list` only. The app setting holds a Key Vault *reference*. The secret value was passed in through an environment variable (`@secure()` in the template, `readEnvironmentVariable` in the parameter file), so it is not in Git and shows as `*******` in `what-if` and deployment history. | The app proves who it is with its identity; no password exists to leak. Read-only for the app means a compromised app cannot overwrite secrets. |
-| **Key Vault permission model** | Access policies (`enableRbacAuthorization: false`), a deliberate trade-off. | RBAC is the recommended model, but it needs a role assignment per identity, and role assignments die with the resource group (the same problem as above). Access policies live inside the vault resource and work with plain `Contributor`. Less granular and older, but it works with the rights this subscription grants. With the right to assign roles, RBAC would be the better choice. |
+| **Key Vault permission model** | Access policies (`enableRbacAuthorization: false`), a deliberate trade-off. | RBAC is the recommended model, but it needs a role assignment per identity, and role assignments die with the resource group (the same problem as above). Access policies live inside the vault resource and work with plain `Contributor`. (Two planes are involved: `Contributor` governs the vault resource itself, the *control plane*; who may read or write the secrets inside it, the *data plane*, is governed by the access policies. That is why one can be allowed to create a vault and still not read its contents.) Less granular and older, but it works with the rights this subscription grants. With the right to assign roles, RBAC would be the better choice. |
 | **Registry access** | The registry has its **admin user enabled**; the Container App pulls the image with that username and password, stored as a Container App secret and read at deploy time with `acr.listCredentials()` (never typed, never in Git). | A conscious trade-off: it is the simplest working setup, but it is one shared credential that can push, pull and delete for the whole registry. The better design (a managed identity with the `AcrPull` role, no password at all) was **built and verified** and then **reverted**: its role assignment sits on the registry inside the resource group, so after a teardown the rebuilt app would have no right to pull its image and the container track would not start. With the right to assign roles from the provisioning script, this is the first thing to change. |
 | **Transport** | `httpsOnly: true` and a TLS floor of 1.3 on the web app; `allowInsecure: false` on the Container App ingress (HTTP is redirected to HTTPS). | Nothing is served unencrypted. TLS 1.3 is a real restriction: a client that only speaks TLS 1.2 is refused. |
 | **Network** | No restrictions: both apps are public on purpose (they are public APIs), and the vault and registry are reachable over the internet but require authentication. | The assignment asks for identity *or* network limits, and identity was the focus. Next step: Key Vault firewall or private endpoint, and private link for the registry (needs the Premium tier). |
@@ -422,6 +430,8 @@ gh workflow run deploy-container.yml
 **A secret that is not rebuilt, on purpose.** `provision-all.sh` does not deploy the Key Vault, and `MY_SECRET` is set with a CLI command, not in Bicep. A vault that is deleted keeps its name for 7 days (soft delete cannot be turned off), so a rebuild script that creates it would fail on the second run. And `appSettings` in a template **replaces all** settings of the app, so a template that owns one setting must own every setting, otherwise everything set by hand disappears at the next deploy. The consequence: after a rebuild, the app answers `200`, the pipeline is green, and `MY_SECRET` is silently gone. It is a conscious deviation from "everything as code"; the next step is to move all app settings and the vault into the templates.
 
 ## B5. Alternatives considered
+
+**Why this combination fits scalability best.** The app is stateless apart from a read-only cache (B2), so it can be copied freely, and both tracks use that in two different ways. The web track scales by a number (3 instances on one plan, the most B1 allows): simple and predictable. The container track scales by a range and a rule (1 to 5 replicas, one more at every 20 concurrent requests), so capacity follows the load without anyone acting. Everything that sets the scale is a parameter in a Bicep file (`instanceCount`, `minReplicas`, `maxReplicas`, `concurrentRequests`), so changing capacity is a change reviewed in Git, and the pipelines together with `provision-all.sh` make the whole environment reproducible, which is what makes it safe to scale out and to tear down. Managed platforms were chosen over virtual machines or a Kubernetes cluster because there scaling is a setting, not machinery to build and operate. The honest limits: on B1 the web track cannot react to load by itself (B2), and neither track has been load-tested (B6).
 
 | Decision | Chosen | Considered, and why not |
 |---|---|---|
@@ -435,6 +445,9 @@ gh workflow run deploy-container.yml
 | Secret store | Key Vault with managed identity | **GitHub or app settings holding the value**: the secret would be copied into places that cannot be audited or rotated centrally. |
 | Vault permissions | Access policies | **RBAC**: preferred in general, blocked here by the need to assign roles per identity (B4). |
 | Registry credentials | Admin user | **Managed identity with `AcrPull`**: better, built, reverted (B4). |
+| Operating Azure | Azure CLI in bash scripts | **The portal**: fine for looking around, and its Deployment Center once generated a workflow for this repository (tried and removed again), but clicks cannot be reviewed, repeated or kept in Git, so they cannot be part of a rebuild script. |
+| Shell | bash (Git Bash on Windows) | **PowerShell**: native on Windows, but the scripts must also run unchanged on the GitHub runner (Ubuntu) and on Linux or macOS, and bash is the shell that exists everywhere. The cost is Git Bash's path rewriting (C-4). |
+| Type of managed identity | System-assigned (web app) | **User-assigned**: a separate resource that can be shared between several apps. Not needed here: one web app uses the identity, and a system-assigned one needs nothing to create or share. |
 
 ## B6. Known limitations and next steps
 
@@ -502,6 +515,20 @@ Each of these happened while building this. Symptom, cause, fix.
 | State kept per instance or replica | B2 |
 | Honest limits and next steps | B6 |
 
+## The nine learning goals, and where each is answered
+
+| Goal | Where |
+|---|---|
+| **K1** Cloud platforms and basic services (VG: with alternatives) | B1 (services and why), B5 (alternatives) |
+| **K2** Load balancing and security | B2 (scaling and load balancing in both tracks), B4 (HTTPS, TLS 1.3, no secret in code, Key Vault), A8 (verified) |
+| **K3** Terminology | "Terms used in this document" in section 1; the same terms throughout (instance for the web track, replica for the container track) |
+| **K4** CI/CD and deployment strategies | B3: in-place deployment on the web track, rolling update on the container track, and why; the described strategy is the one the workflows implement |
+| **F1** Container solution with CI/CD and tutorial (VG: someone without prior knowledge can follow it) | `deploy-container.yml`, `src/Beacon.Api/Dockerfile`, Part A (A6 to A8), Part C |
+| **F2** Web app with CI/CD and tutorial (VG: also security design) | `deploy.yml`, `infra/main.bicep`, Part A, B4 and A9 (secrets and identity, with reasons) |
+| **F3** Administration and scripting | `scripts/` (four own scripts), run by hand and by the pipelines |
+| **Komp1** Basic tools (VG: chosen and motivated) | B1 and B5 (Azure CLI, bash, Bicep, GitHub Actions, and what was considered instead) |
+| **Komp2** Designing architectural patterns (VG: alternatives and why it fits scalability best) | B2 and B5 ("Why this combination fits scalability best") |
+
 ## Verification status
 
 This document was tested by following it, on **2026-10-05**, against an empty Azure subscription state (no resource group) with the repository's real names (`NAME=namn`).
@@ -510,7 +537,7 @@ This document was tested by following it, on **2026-10-05**, against an empty Az
 - A2: tests and local run (`/health`, `/api/status`, `/api/games/search`).
 - A3: the name substitution, on a scratch copy of the repository (all templates and parameter files still compile afterwards; no placeholder left).
 - A5: every command, on a temporary app registration (`gh-clo25-tutorialtest-we`) that was created, inspected and deleted again. `gh variable set` was not re-run, because it would overwrite the real variables.
-- A6: `./scripts/provision-all.sh` built both tracks from nothing (resource group, plan, web app, registry, image, Container Apps environment, container app, role assignment). It took three runs; the failures are C-3, C-18 and C-20, and the scripts were changed to handle the last two. Region: **Sweden Central**, because West Europe was closed to new resources for this subscription that day.
+- A6: `./scripts/provision-all.sh` built both tracks from nothing (resource group, plan, web app, registry, image, Container Apps environment, Container App, role assignment). It took three runs; the failures are C-3, C-18 and C-20, and the scripts were changed to handle the last two. Region: **Sweden Central**, because West Europe was closed to new resources for this subscription that day.
 - A7 and A8: both pipelines are green on commit `c425257`, first attempt, from a pushed commit: [web track run](https://github.com/Xnenon02/beacon/actions/runs/37327245801) and [container track run](https://github.com/Xnenon02/beacon/actions/runs/37327245703). Before the first deployment the web app answered `404` on `/health` and `/api/status`; after it, `200` and `{"app":"Beacon","status":"running"}`. The image running in the Container App had exactly the commit's SHA as its tag; the plan had 3 instances; the revision list showed the rollout described in B3. An earlier run on the way there failed on a timing problem and went green when re-run (C-18, C-20; [run 1](https://github.com/Xnenon02/beacon/actions/runs/37323165135), [run 2](https://github.com/Xnenon02/beacon/actions/runs/37324469228)).
 - Starting the pipelines by hand with `gh workflow run deploy.yml` and `gh workflow run deploy-container.yml` (the way to deploy after a rebuild): both green ([web](https://github.com/Xnenon02/beacon/actions/runs/37327745572), [container](https://github.com/Xnenon02/beacon/actions/runs/37327752033)).
 - A10: the teardown commands were run at the end of the session.
