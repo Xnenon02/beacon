@@ -1,1161 +1,506 @@
-# Tutorial: Deploying Beacon to Azure App Service
+# Beacon on Azure: one app, two deployments
 
-This log captures each command run, in order, along with what happened, any
-decisions made, and gotchas hit along the way — written so a classmate can
-follow it step by step and get the same result.
+Beacon is a small ASP.NET Core API (plus a static page) that is deployed to Azure in two ways:
 
-## Naming convention
+1. as a **web app on Azure App Service** (the *web track*), and
+2. as a **container on Azure Container Apps** (the *container track*).
 
-Every resource below follows this pattern:
+Both are created with Bicep, built and deployed by GitHub Actions, and designed to run more than one copy of the app. This document is the only documentation: it explains **what** was built, **why**, and **how to rebuild it from an empty repository and an empty Azure subscription**.
 
-| Resource            | Placeholder pattern            | Used in this walkthrough |
-|----------------------|--------------------------------|---------------------------|
-| Resource group        | `rg-clo25-<your-name>-we`     | `rg-clo25-namn-we`        |
-| App Service plan      | `asp-clo25-<your-name>-we`    | `asp-clo25-namn-we`       |
-| Web app                | `app-clo25-<your-name>-we`   | `app-clo25-namn-we`       |
+- **Part A** is the step-by-step guide. Follow it top to bottom.
+- **Part B** explains the design: services, scaling, deployment strategy, security, alternatives and limits.
+- **Part C** lists everything that actually went wrong while building this, as symptom, cause, fix.
+- **Part D** checks the result against the assignment.
 
-- **If you're following this tutorial for your own deployment:** replace
-  `<your-name>` with your own identifier (e.g. your initials or student ID).
-  This matters most for the web app name — it becomes part of a public URL
-  (`<name>.azurewebsites.net`) and must be globally unique across all of
-  Azure, so `app-clo25-namn-we` will already be taken once someone else uses
-  it.
-- **The hardcoded names in this doc** (`rg-clo25-namn-we`,
-  `asp-clo25-namn-we`, `app-clo25-namn-we`) are real, already-created
-  resources from this walkthrough. They're left in the commands as-is so
-  they can be copy-pasted directly if you want to manage or reuse *this
-  specific* deployment outside the tutorial — just don't expect
-  `app-clo25-namn-we` to be free if you try to create your own with that
-  exact name.
-- The `-we` suffix marks **West Europe**, chosen after the first attempt hit
-  a capacity issue in Sweden Central — see Step 1.
+> The chronological lab log this document was rewritten from is still in git history: `git show 8364863:TUTORIAL.md`.
 
-## Prerequisites
+---
 
-Before Step 1:
+## 1. Overview
 
-1. **Log in and confirm the active subscription:**
+### What is deployed
 
-   ```bash
-   az login
-   az account show --query "{name:name, user:user.name}" -o table
-   ```
-
-2. **Confirm the .NET SDK version matches the project target** (.NET 10):
-
-   ```bash
-   dotnet --version
-   ```
-
-3. **Clone the repo and `cd` into it** so the relative paths used below
-   (`src/Beacon.Api`, `artifacts/publish`) resolve correctly.
-
-4. **Run the app locally first**, before touching Azure. This gives you a
-   baseline — if something breaks later, you'll know whether the problem is
-   in the app or in the deployment:
-
-   ```bash
-   dotnet run --project src/Beacon.Api
-   ```
-
-   Then, in another terminal, hit the health endpoint on whatever port
-   `dotnet run` printed (e.g. `http://localhost:5000/health`):
-
-   ```bash
-   curl -s -o /dev/null -w "%{http_code}\n" http://localhost:<port>/health
-   ```
-
-   Expect `200` before moving on.
-
-## Step 1: Create the App Service Plan
-
-> **Historical failed attempt — do not copy this command.** It's kept here
-> because the failure and the decision it led to are part of the story. It
-> uses the plain (non-`-we`) names on purpose, matching what was actually
-> typed at the time. The command that actually worked is in Step 3, using
-> the `-we`-suffixed names from the table above.
-
-```bash
-az appservice plan create \
-  --name asp-clo25-namn \
-  --resource-group rg-clo25-namn \
-  --location swedencentral \
-  --sku B1 \
-  --is-linux
-```
-
-**Result:** Failed.
-
-```
-Creating App Service Plan 'asp-clo25-namn' (Linux, SKU: B1).
-No available instances to satisfy this request. App Service is attempting to
-increase capacity. Please retry your request later or consider enabling Async
-Scaling on your app service plan: aka.ms/async-scaling. If urgent, this can be
-mitigated by deploying this to a new resource group.
-```
-
-**Cause:** Azure had no available Linux B1 capacity in `swedencentral` for
-this resource group at the time of the request — a transient regional
-capacity issue, not a config error.
-
-**Options when this happens:** retry later, enable Async Scaling, try a
-different region, or use a new resource group.
-
-**Decision:** retry in **West Europe** with new resource names, suffixed
-`-we`: `rg-clo25-namn-we`, `asp-clo25-namn-we`, `app-clo25-namn-we` (see
-Naming convention above — substitute your own `<your-name>`).
-
-## Step 2: Confirm the resource group exists
-
-```bash
-az group exists --name rg-clo25-namn-we
-```
-
-**Result:** `false` (group didn't exist yet on first run).
-
-If `false`, create it:
-
-```bash
-az group create \
-  --name rg-clo25-namn-we \
-  --location westeurope
-```
-
-**Why this step exists:** the App Service plan/webapp commands in Step 3
-don't create the resource group for you — if it's missing they fail with
-`ResourceGroupNotFound` and do nothing. This is intentional: a typo'd group
-name becomes an error instead of silently creating a stray empty group that
-sits around costing money. This is also the same check used to confirm a
-teardown worked — but there you want the answer to be `false`.
-
-## Step 3: Create the App Service plan and the app
-
-The plan (the machines the app runs on, and what gets scaled in Step 6):
-
-```bash
-az appservice plan create \
-  --name asp-clo25-namn-we \
-  --resource-group rg-clo25-namn-we \
-  --location westeurope \
-  --sku B1 \
-  --is-linux
-```
-
-Then the app, linked to the plan via `--plan`:
-
-```bash
-az webapp create \
-  --name app-clo25-namn-we \
-  --resource-group rg-clo25-namn-we \
-  --plan asp-clo25-namn-we \
-  --runtime "DOTNETCORE:10.0"
-```
-
-Both take roughly 30 seconds. Both return a yellow `WARNING` line that is not
-an error — the first confirms `(Linux, SKU: B1)`, the second says "Deploy
-your code with: az webapp deploy", i.e. exactly the next step.
-
-`--is-linux` is explicit here even though current Azure CLI defaults to
-Linux — a command that states what it does is worth five extra characters,
-and it protects against an older CLI where the default was Windows (where
-`DOTNETCORE:10.0` isn't a valid runtime).
-
-## Step 4: Deploy the code
-
-`az webapp deploy` wants a zip file, not a folder, so the app must be built
-and packed first.
-
-Packing is handled by an MSBuild target added once to
-`src/Beacon.Api/Beacon.Api.csproj`, just before `</Project>`:
-
-```xml
-  <!-- Zips the publish output to app.zip, next to the publish folder -->
-  <Target Name="ZipPublishOutput" AfterTargets="Publish">
-    <ZipDirectory SourceDirectory="$(PublishDir)"
-                  DestinationFile="$(PublishDir)../app.zip"
-                  Overwrite="true" />
-  </Target>
-```
-
-This lives in the project file rather than the terminal because there's no
-zip command that works identically everywhere: `zip` exists on Mac/Linux but
-not in Git Bash on Windows, and `Compress-Archive` is PowerShell-only.
-`dotnet` is available everywhere, and letting the build system produce the
-deployable artifact is exactly what the CI/CD pipeline will do from next
-week.
-
-Then two commands:
-
-```bash
-dotnet publish src/Beacon.Api --configuration Release --output artifacts/publish
-
-az webapp deploy \
-  --resource-group rg-clo25-namn-we \
-  --name app-clo25-namn-we \
-  --src-path artifacts/app.zip \
-  --type zip
-```
-
-Verify the zip exists (check the file, not the console output — recent
-`dotnet` versions print a compact summary and won't show a "Zipping" line
-even though the zip is created):
-
-```bash
-ls artifacts/
-```
-
-Expect both `app.zip` and the `publish/` folder. `artifacts/` is already in
-`.gitignore` (from `dotnet new gitignore` in lab 01), so neither the folder
-nor the zip can accidentally get committed — confirm with `git status`, it
-shouldn't mention them.
-
-Deploy takes 1–2 minutes and ends with `"status": "RuntimeSuccessful"`.
-Azure's `SCM_DO_BUILD_DURING_DEPLOYMENT` note in the response can be ignored
-here — `dotnet publish` already built the package, which is the whole point
-of the step before. That setting matters for source-only deploys.
-
-**Gotcha:** the deploy command's own status polling can fail or report a
-misleading status (e.g. `"BuildSuccessful"` with `numberOfInstancesSuccessful:
-0`, or a dropped `ConnectionAbortedError`) even when the deployment itself
-succeeded. **CLI polling can fail even if deployment succeeds — always verify
-the application independently using `/health`** (Step 5), not the JSON status
-field alone.
-
-## Step 5: Verify the app responds
-
-Open the app URL in a browser, and check the health endpoint:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" \
-  https://app-clo25-namn-we.azurewebsites.net/health
-```
-
-**Result:** `200` — app confirmed live and healthy.
-
-## Step 6: Scale out and verify (K2 evidence)
-
-This is **manual scale-out**, not autoscaling. The **Basic** tier (B1)
-supports manually setting the worker count (up to 3), but rule-based
-autoscale — where Azure adds/removes instances automatically based on load —
-requires the **Standard** tier or higher.
-
-Check the current plan tier/instance count:
-
-```bash
-az appservice plan list \
-  --resource-group rg-clo25-namn-we \
-  --query "[].{Name:name, Tier:sku.name, Instances:sku.capacity}" \
-  --output table
-```
-
-**Result (before scaling):**
-
-```
-Name               Tier    Instances
------------------  ------  -----------
-asp-clo25-namn-we  B1      1
-```
-
-Scale the plan from 1 to 3 instances:
-
-```bash
-az appservice plan update \
-  --name asp-clo25-namn-we \
-  --resource-group rg-clo25-namn-we \
-  --number-of-workers 3
-```
-
-**Result:** succeeded — response confirms `"sku": {"name": "B1", "tier":
-"Basic", "capacity": 3}` and `"numberOfWorkers": 3`, `"provisioningState":
-"Succeeded"`.
-
-Re-run the same `list` check to verify independently of the update response:
-
-```bash
-az appservice plan list \
-  --resource-group rg-clo25-namn-we \
-  --query "[].{Name:name, Tier:sku.name, Instances:sku.capacity}" \
-  --output table
-```
-
-**Result (after scaling):**
-
-```
-Name               Tier    Instances
------------------  ------  -----------
-asp-clo25-namn-we  B1      3
-```
-
-**This is the K2 evidence:** tier `B1`, scaled from 1 → 3 instances, with
-load balancing across instances handled automatically by the App Service
-plan — confirmed via two independent checks (the update command's own
-response, and a separate `list` query), not just a single self-reported
-success message.
-
-## Step 7: Configure the health check
-
-**Portal path (for reference):** App Service → **Monitoring** (left menu) →
-**Health check** → toggle **Enable**, set path to `/health`, click **Save**.
-
-Worth noting what else lives under **Monitoring**: Alerts, Metrics, Logs,
-Diagnostic settings. Health check isn't a random setting buried somewhere —
-it belongs among the tools that watch whether the app is healthy, which
-says something about its purpose.
-
-**CLI equivalent — set the health check path:**
-
-```bash
-az webapp config set \
-  --resource-group rg-clo25-namn-we \
-  --name app-clo25-namn-we \
-  --generic-configurations health_check_path="/health"
-```
-
-**Verify it was set:**
-
-```bash
-az webapp show \
-  --resource-group rg-clo25-namn-we \
-  --name app-clo25-namn-we \
-  --query siteConfig.healthCheckPath \
-  --output tsv
-```
-
-**Result (actual):** `C:/Program Files/Git/health` — **not** `/health`.
-
-### Gotcha: Git Bash rewrites the path before Azure ever sees it
-
-If you're running these commands from **Git Bash on Windows** (MINGW), it
-automatically rewrites any argument that looks like a POSIX absolute path —
-anything starting with a single `/` — into a Windows path before the command
-even runs. So `health_check_path="/health"` silently became
-`health_check_path="C:/Program Files/Git/health"`. The `az webapp config
-set` command itself succeeded; it just set the wrong value. This is a
-Windows/Git-Bash-specific trap, not an Azure CLI bug, and it won't happen in
-PowerShell, cmd, or a Mac/Linux terminal.
-
-Two ways to work around it — pick whichever fits your setup:
-
-**Option A — double the leading slash (`//health`)**
-
-```bash
-az webapp config set \
-  --resource-group rg-clo25-namn-we \
-  --name app-clo25-namn-we \
-  --generic-configurations health_check_path="//health"
-```
-
-*How it works:* MSYS's path-conversion heuristic specifically skips
-rewriting arguments that start with two slashes, since that pattern is
-reserved for UNC network paths (`//server/share`) on Windows. So the literal
-string `//health` survives untouched.
-
-*Why it's not quite right:* untouched doesn't mean correct — the value Azure
-actually stores is `//health`, two slashes, not `/health`. That's a
-different string from the route your app registers
-(`app.MapHealthChecks("/health")`), and may not match depending on how
-strictly the health-check prober compares paths. Use this only if you've
-confirmed it matches; otherwise prefer Option B.
-
-**Option B — disable MSYS path conversion for the command (recommended)**
-
-```bash
-MSYS_NO_PATHCONV=1 az webapp config set \
-  --resource-group rg-clo25-namn-we \
-  --name app-clo25-namn-we \
-  --generic-configurations health_check_path="/health"
-```
-
-*How it works:* `MSYS_NO_PATHCONV=1` tells Git Bash's MSYS layer to skip its
-path-conversion step entirely for this one command, so `/health` is passed
-through to `az` exactly as typed.
-
-*Why it's the safer default:* it produces the exact intended value,
-`/health`, with no ambiguity. `MSYS_NO_PATHCONV` only means something in Git
-Bash/MSYS on Windows; on macOS/Linux terminals it's an unused environment
-variable with no effect, and there's no path-mangling bug there to begin
-with — same command line works everywhere on those.
-
-**PowerShell/cmd note:** the `VAR=value command` form above is Unix/Git-Bash
-syntax and does **not** work in PowerShell or cmd — those shells don't
-rewrite `/health` in the first place, so the bug doesn't occur there and no
-workaround is needed. If you are in PowerShell, just run:
-
-```powershell
-az webapp config set `
-  --resource-group rg-clo25-namn-we `
-  --name app-clo25-namn-we `
-  --generic-configurations health_check_path="/health"
-```
-
-Then re-verify with the same `show` command as before, expecting `/health`
-this time.
-
-**Result (after Option B fix):** `/health` — confirmed correct.
-
-**Restart the app to apply/observe it in practice:**
-
-```bash
-az webapp restart --resource-group rg-clo25-namn-we --name app-clo25-namn-we
-```
-
-**Result:** command returned no visible output in the terminal — normal for
-`az webapp restart` (it doesn't print a confirmation payload by default).
-Success confirmed by re-running the Step 5 health check curl:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" \
-  https://app-clo25-namn-we.azurewebsites.net/health
-```
-
-**Result:** `200` — app back up and healthy after restart, with `/health`
-now correctly configured as the health check path.
-
-## Step 8: Demolition — tear down everything
-
-Once you're done and have written down what you need (see the intro to this
-document — tier, instance count, app name, resource group, and *why*), tear
-the whole thing down. Everything in this lab lives inside one resource
-group, so deleting the group deletes everything in it.
-
-**First, list what's actually in the resource group**, so you have a record
-of what's about to be deleted:
-
-```bash
-az resource list \
-  --resource-group rg-clo25-namn-we \
-  --query "[].{Name:name, Type:type}" \
-  --output table
-```
-
-**Result:**
-
-```
-Name               Type
------------------  -------------------------
-asp-clo25-namn-we  Microsoft.Web/serverFarms
-app-clo25-namn-we  Microsoft.Web/sites
-```
-
-**Then delete the resource group:**
-
-```bash
-az group delete \
-  --name rg-clo25-namn-we \
-  --yes \
-  --no-wait
-```
-
-**What the two flags do:**
-
-- `--yes` skips the interactive confirmation prompt (`Are you sure you want
-  to perform this operation? (y/n)`) that `az group delete` normally shows
-  before deleting anything. Without it, the command would sit there waiting
-  for you to type `y`.
-- `--no-wait` returns control to your terminal immediately after Azure
-  *accepts* the delete request, instead of blocking until every resource in
-  the group has actually finished being deleted (which can take a few
-  minutes). This is why the terminal shows nothing and returns right away —
-  that's expected, not a hang or a silent failure. Deletion keeps running on
-  Azure's side in the background.
-
-**Result:** no output — expected, due to `--no-wait`.
-
-**Verify the teardown** by listing the resource group's contents again (or
-checking `az group exists`, which should now return `false`):
-
-```bash
-az resource list \
-  --resource-group rg-clo25-namn-we \
-  --query "[].{Name:name, Type:type}" \
-  --output table
-```
-
-**Result:**
-
-```
-(ResourceGroupNotFound) Resource group 'rg-clo25-namn-we' could not be found.
-Code: ResourceGroupNotFound
-Message: Resource group 'rg-clo25-namn-we' could not be found.
-```
-
-This confirms the resource group — and everything inside it (the App
-Service plan and the web app) — is gone. If you're ever unsure whether a
-`--no-wait` deletion has actually finished, this is the check to re-run; you
-can also confirm visually in the Azure portal.
-
-**Because `--no-wait` means the CLI doesn't wait, this verification step can
-return `ResourceGroupNotFound` — full success — or, if run too soon, might
-still show the group with resources present but disappearing. If that
-happens, it's not a failure, just a timing thing: wait a bit and re-run the
-check.**
-
-# CI/CD pipeline (lab 03)
-
-## Del 0: rebuilding from scratch
-
-Same five commands as before (group, plan, app, publish, deploy), same
-naming convention. This time capacity was a bigger problem than usual:
-Sweden Central and West Europe both failed with "no available instances,"
-and North Europe failed differently — `Current Limit (B1 VMs): 0`, a real
-subscription quota of zero in that region, not a transient issue. West
-Europe had already proven to work earlier in the day (this exact
-subscription successfully created and scaled a B1 plan there before), so
-that's the region worth retrying rather than guessing at untested ones. A
-short retry loop (a few attempts, minutes apart) got past the transient
-capacity error on the second try. Lesson for next time: if a region fails,
-check whether it's the "no available instances" message (transient, worth
-retrying) or a quota number in the error (not transient, needs a different
-region or a quota increase request).
-
-## Del 1: connecting the repo to Azure
-
-Followed the lab's 8 steps in order — read the real name/address from
-Azure rather than trusting memory, enabled basic publishing credentials on
-the `scm` site, fetched the publish profile, set it as the
-`AZURE_WEBAPP_PUBLISH_PROFILE` GitHub secret, deleted the local copy
-immediately and gitignored it, set `SCM_DO_BUILD_DURING_DEPLOYMENT=false`
-explicitly, and wrote `.github/workflows/deploy.yml`.
-
-Two things worth a note:
-
-- The lab's own placeholder check (`grep -n "clo25-namn"`) gives a false
-  positive here, because this project's naming convention appends a region
-  suffix (`-we`), and `app-clo25-namn-we` still contains the substring
-  `clo25-namn`. That's expected — the values are correctly filled in, just
-  not literally absent from the grep.
-- `workflow_dispatch` only works for a workflow file that already exists on
-  the repo's *default* branch. Pushed on a feature branch first (per this
-  project's own rule of never pushing straight to `main`), which meant the
-  pipeline couldn't be dry-run before merging — GitHub simply doesn't
-  register a workflow file living only on a branch. Adding a `pull_request`
-  trigger as a workaround isn't a good idea for this workflow either, since
-  the `deploy` job pushes to the real Azure app — you don't want that
-  firing on every PR. So the actual first run only happened at merge time,
-  which lines up with what the lab calls the checkpoint anyway.
-
-## Del 2: getting deploy green, and confirming it's not just theater
-
-First run went green immediately — no auth troubleshooting needed this
-time (`gh auth setup-git`, done back in lab 02's prep, meant the publish
-profile secret was correct on the first try).
-
-Pushed a small, visible text change (added "— deployed via CI/CD" to the
-UI's subtitle) specifically to prove the pipeline deploys *real* changes,
-not just that the YAML runs. Confirmed two ways: the workflow's own log
-went green, and — separately — `curl`ing the live app afterward showed the
-new text. The lab's warning about the propagation gap (green != new code
-live yet) held up here too: checked immediately after green and it can
-still be stale for roughly a minute while App Service swaps to the new
-package.
-
-## Del 3: smoke test script (F3)
-
-`scripts/health-check.sh` — a smoke test, not a correctness test. It asks
-exactly one question: does the app respond `200` on a given URL? It doesn't
-check that the response is *right*, only that something is listening and
-healthy. Real correctness checks already ran in the `build` job's
-`dotnet test` step.
-
-Built with two arguments: the URL (required — the script refuses to run
-without it, with a clear error) and an optional attempt count (defaults to
-10, 5 seconds apart). Tested locally both ways before touching the
-pipeline: against the real `/health` (succeeded on attempt 1, exit 0), and
-against a nonexistent path with only 2 attempts (two `404`s, "Giving up.",
-exit 1, done in ~5 seconds instead of the default ~45).
-
-Wired into the `deploy` job *after* the actual deploy step, with
-`actions/checkout` added first in that job (the script lives in the repo,
-and each job starts on a clean machine with nothing checked out — and
-checkout has to come before `download-artifact`, since checkout clears the
-working directory and would delete the downloaded package if it ran
-second).
-
-**The honest limitation, worth remembering:** a green smoke test here only
-proves the app answered `200` — not that it's running the *new* code. If
-the health check runs moments after deploy finishes, it's entirely possible
-the still-running old version answers first, before App Service has
-swapped to the new package. What this script *does* reliably catch is the
-worst case — a new version that fails to start at all, which would make
-`/health` stop responding and turn the *next* deploy's health check red.
-The loop (attempts + delay) exists specifically so a normal, brief restart
-window doesn't get mistaken for that failure — a single `curl` with no
-retry would have flagged this exact deploy as broken on the first run of
-the day, purely because `/health` hadn't started answering yet (a handful
-of `404`s while the new app boots is normal on a fresh app; ten in a row is
-a real failure).
-
-**Idea for later (F2):** the only way to make this script actually confirm
-"the new code is live," not just "something answered `200`," is for
-`/health` to report a version or build identifier the script can compare
-against what was just deployed. Worth doing once the app has a natural
-place to put that (a build-time stamp, a commit SHA, something similar).
-
-## Fördjupning 06 notes
-
-Read the live log stream (`az webapp log tail`) through a restart — got the
-full startup sequence (`Running the command: dotnet "Beacon.Api.dll"` →
-`Now listening on...` → `Application started.` → `Hosting environment:
-Production` → `Site startup probe succeeded after 70.7 seconds`), and hit
-the documented "stream interrupts itself" behavior firsthand: it cut off
-with `Log stream interrupted. Exiting live log stream.` right before the
-final `Site started.` line, because the restart tears down the very
-connection you're watching from. Confirmed the app was actually up anyway
-via a plain `curl` — `200`.
-
-`httpsOnly` was `False` by default (as it is on every app `az webapp
-create` makes) — that doesn't mean the app lacks HTTPS, every
-`*.azurewebsites.net` app has a certificate automatically. It only
-controls whether `http://` gets redirected to `https://`. Turned it on
-(`az webapp update --https-only true`) and confirmed with `curl`: `http://`
-now returns a `301` to the `https://` URL instead of answering directly.
-
-**On `paths-ignore` vs. `paths`:** decided to stick with a deny-list
-(`paths-ignore: ['**.md', '**.http']`) rather than switching to an
-allow-list like `paths: ['src/**']`. Checked it against this project's own
-history: under an allow-list, 2 of the 3 CI/CD-related pushes made today —
-including the one that added the pipeline itself — would have silently
-never triggered a run, since they only touched `.github/workflows/` and
-`scripts/`. A deny-list's worst case is a wasted ~78s run; an allow-list's
-worst case is a push that should deploy and doesn't, with nothing visibly
-wrong. Added `'**.http'` (matching `requests.http`, a dev-only file that
-never affects build or runtime behavior) using the glob rather than the
-literal filename, so it still applies if such a file ever moves into a
-subfolder.
-
-## Infrastructure as Code (Bicep) — lab 04, 2026-09-10
-
-Chose **Plan A** on Tuesday (Fördjupning 07): `az ad sp create-for-rbac`
-succeeded once run with `MSYS_NO_PATHCONV=1` — the failure earlier that day
-was the same Git Bash path-mangling bug as the `health_check_path` gotcha
-above, not a real permissions problem (see the correction note this
-produced, merged from `docs/plan-a-correction`).
-
-### What the template creates, and why (K1)
-
-`infra/main.bicep` describes two resources: the App Service plan
-(`Microsoft.Web/serverfarms`) and the web app (`Microsoft.Web/sites`), linked
-via `serverFarmId: plan.id` inside the template rather than a hardcoded
-resource ID. Nothing else — no resource group (it's deployed *into* one that
-already exists; `az group create` lives in the deploy script instead, not
-the template) and no app settings (declaring `appSettings` would replace
-*all* existing ones, wiping `SCM_DO_BUILD_DURING_DEPLOYMENT` from lab 03 —
-deliberately left out of the template rather than fixed with a merge, since
-getting that merge wrong silently loses settings).
-
-### Scaling (K2)
-
-`sku.capacity: instanceCount`, parameterized with a default of `2` but
-deployed with `instanceCount = 3` in `infra/main.bicepparam` — matching the
-manual scale-out already done by hand in week 35 (`az appservice plan update
---number-of-workers 3`). The value isn't the template's default; it's a
-choice, now written down instead of living only in shell history.
-
-### Security in the template (K2)
-
-`httpsOnly: true` and `minTlsVersion: '1.3'` on the site config, plus
-`healthCheckPath: '/health'`. `minTlsVersion` isn't decorative — it raises
-the floor a client must meet during the TLS handshake; every modern browser
-and `curl` already clears 1.3, so nothing observable changes, but a
-TLS-1.2-only client would now be refused. `what-if` (Step 6) confirmed both
-`httpsOnly` and `alwaysOn` were actually `false` on the live app before this
-deploy — settings assumed correct from week 35 but never verified until they
-were written down as code and compared against reality.
-
-### How it's deployed, and why (F2, Komp1)
-
-`scripts/deploy-infra.sh` wraps `az deployment group create` (plus a resource
-group existence guard, since the group is torn down daily) and supports
-`--what-if` for a dry run. It's wired into `.github/workflows/deploy.yml` as
-its own `infra` job, running in parallel with `build`, with `deploy` gated on
-`needs: [build, infra]` so the app can never deploy before the plan exists.
-Chosen over inlining the Azure CLI calls directly in the YAML so the exact
-same script can be run by hand (`./scripts/deploy-infra.sh rg-clo25-namn-we`)
-or by the pipeline — one implementation, two callers.
-
-**Two real failures hit during Del 3–4, not simulated ones:**
-
-1. `azure/login@v3` was first configured with separate `client-id` /
-   `client-secret` / `tenant-id` / `subscription-id` inputs, matching the
-   four secrets that happened to already exist in the repo. The action
-   rejected `client-secret` outright — v3 only accepts a combined `creds`
-   JSON secret, or OIDC (no secret at all, `client-id`/`tenant-id`/
-   `subscription-id` plus `id-token: write`). Fixed by re-running
-   `create-for-rbac` against the existing identity (patched in place, not
-   duplicated) and storing the result as `AZURE_CREDENTIALS`.
-2. The `deploy` job then failed with `401 Unauthorized` from
-   `azure/webapps-deploy@v3` — the app had been rebuilt earlier the same day
-   and basic publishing credentials were off again, exactly the gotcha noted
-   in Step 4 above. Fixed the same way: `az resource update` on
-   `basicPublishingCredentialsPolicies`, then a fresh publish profile.
-
-### Identity vs. role vs. scope — the tradeoff (K2, Komp2)
-
-The service principal's role assignment is scoped to the resource group
-(`--scopes .../resourceGroups/rg-clo25-namn-we`), not the subscription. That
-means the assignment — unlike the identity itself — does **not** survive a
-teardown, and the pipeline would fail on `AuthorizationFailed` next time
-until it's re-granted. The alternative (scope the role at the subscription
-level) would survive teardown and remove this problem entirely, at the cost
-of letting the pipeline create or delete anything in the whole subscription,
-not just this one resource group. Chose the narrow scope and paid for it
-with a script, not a wider blast radius.
-
-**Del 4 removed the two things that used to require doing by hand every
-lesson day:**
-
-- **Publish-profile rotation** — `deploy` now authenticates with the same
-  service principal as `infra` (`azure/login` step added, `publish-profile`
-  input removed from `azure/webapps-deploy`). The key that used to die with
-  every rebuilt app is gone entirely; the identity in Entra ID doesn't need
-  rotating.
-- **The role assignment itself** — `scripts/deploy-infra.sh` now looks up
-  the identity by name (`SP_NAME`, not a hardcoded object ID — the script
-  queries Entra ID for it, so no tenant identifiers live in the repo) and
-  re-grants `Contributor` on the resource group if the assignment is
-  missing. Guarded with `2>/dev/null || true` so a lookup failure (e.g. the
-  pipeline's own identity not being allowed to read the directory) skips the
-  block silently rather than failing the whole deployment — in practice,
-  this run's pipeline *could* read the directory and printed `pipeline
-  identity already has Contributor`, so the guard wasn't needed this time,
-  but stays as protection for whenever it is.
-
-Net effect: rebuilding from scratch next lesson day is one command
-(`./scripts/deploy-infra.sh rg-clo25-namn-we`), with no manual key or role
-step left to forget.
-
-## Containerizing the app: ACR + Container Apps — lab 05, 2026-09-17
-
-### Docker Desktop doesn't work on this machine, and why that's fine
-
-`docker build` failed with `docker: command not found`; installing Docker
-Desktop failed at first launch with "Virtualization support not detected" —
-"Contact your IT admin," meaning virtualization is locked at a policy level
-on this school-managed machine, not just off in BIOS. Confirmed once and
-stopped there rather than fighting a setting that isn't mine to change.
-
-Correcting an assumption from earlier in the week: Docker's WSL2 backend
-does *not* require the full "Hyper-V" Windows feature — only the lighter
-"Virtual Machine Platform" component plus CPU-level virtualization
-(VT-x/AMD-V). It "just worked" in the past because that hardware setting was
-already on by default, not because nothing was needed. Here it's actively
-blocked, so the point is moot either way.
-
-**Consequence: every image in this course is built with `az acr build`
-instead of `docker build`.** Same `--file`, same trailing `.` build context,
-same result — the difference is only *where* the build runs (a build
-container in Azure, not a local Docker daemon), which is exactly why no
-local Docker is needed at all. `docker run -p 8080:8080` for a quick local
-smoke test has no real equivalent for the same reason — ACR is a registry,
-not a runtime, and `az acr run` is built for build-time steps, not for
-starting a long-lived container to curl against. Azure Container Instances
-(ACI) would be the closest match, but the course's own answer is simpler:
-skip the local step, deploy straight to Container Apps, and test the live
-URL instead.
-
-### What got built, and why (K1)
-
-`infra/container.bicep` grew in two passes, mirroring the hard ordering
-constraint (registry → image → environment/app — a Container App deploy
-fails outright if the image it points to doesn't exist yet):
-
-1. **Registry only** (`Microsoft.ContainerRegistry/registries`,
-   `acrclo25namnwe`) — deployed alone first. It already existed (created
-   manually before the template existed), so this `what-if` showed only
-   `~ Modify` (`adminUserEnabled: false → true`), no `+`.
-2. **Environment + Container App added** (`Microsoft.App/managedEnvironments`
-   `cae-clo25-namnwe`, `Microsoft.App/containerApps` `ca-clo25-namnwe`) once
-   `beacon:v1` was actually pushed. `what-if` showed exactly 2 `+` and
-   nothing else — the registry, unchanged, stayed `~`.
-
-`adminUserEnabled: true` on the registry is a deliberate, written-down
-trade-off: it's the simplest way for the Container App to pull the image
-(username + password), not the best one. The better way — managed identity
-+ an `AcrPull` role assignment, no stored password at all — is the same
-upgrade path as OIDC for the pipeline, both slated for week 40.
-
-### Scaling and security as code (K2)
-
-`scale.minReplicas: 1`, `maxReplicas: 5`, `concurrentRequests: 20` —
-defaults kept as-is (the exercise meant to set these deliberately was
-missed), so the honest note here is *why* they're defaults rather than a
-chosen number: they're reasonable for a course project with no real traffic,
-and the thing to change first under real load would be `concurrentRequests`
-(lower it to scale out sooner) before touching the replica ceiling.
-
-Compare to App Service's scaling story: `sku.capacity: 3` there was a fixed
-worker count. Here it's a *range* plus a *rule* — Container Apps decides how
-many replicas to run, live, based on concurrent HTTP load. Same idea as
-`az appservice plan update --number-of-workers 3` from week 35, one level
-more automatic.
-
-`acr.listCredentials()` inside the template means the registry password is
-never typed anywhere, never lands in shell history, never touches Git — the
-template only describes *how* to fetch it at deploy time. `cpu:
-json(containerCpu)` exists because Bicep has no native decimal literal;
-skipping `json()` produces a compile error that doesn't explain itself.
-
-### Deploying it, and a real bug hit twice (F2, Komp1)
-
-`scripts/deploy-container.sh` is a copy of `deploy-infra.sh` differing in
-exactly three lines (`PARAM_FILE`, `TEMPLATE`, the `DEPLOYMENT_NAME` prefix)
-— verified with `diff -u`, not by eye. It inherited the role-assignment
-self-healing block from week 37 unchanged, which is why it isn't part of the
-diff at all.
-
-**The Git Bash path-mangling bug (first hit in week 37 on
-`health_check_path`) struck a third time**, this time on the self-healing
-block's `--scope "/subscriptions/..."` argument: without
-`MSYS_NO_PATHCONV=1` exported, the deployment itself succeeded but the
-role-check step failed with `MissingSubscription` — the leading slash got
-rewritten into a Windows path again. Same root cause, third different
-symptom (`health_check_path` → `az ad sp create-for-rbac --scopes` →
-this). Worth writing down as a pattern, not three separate bugs: *any*
-`az` argument starting with a single `/`, run from Git Bash on Windows, is
-suspect until proven otherwise.
-
-**A second, unrelated failure**: pushing today's changes triggered *both*
-pipelines (container track's `scripts/` change isn't excluded by either
-workflow's `paths-ignore`), and the App Service pipeline's health check
-failed with ten straight `404`s. Direct `curl` moments later returned `200`
-— the `infra` job's Bicep deploy had reset `alwaysOn`/health-check
-configuration, restarting the app, and the pipeline's ~45-second retry
-budget ran out just before the app finished restarting. Re-running the
-failed job confirmed it: a false negative from timing, not a real
-regression — the same class of gotcha as the `000`/`503` responses
-documented in Step 4 above, just manifesting as `404` this time.
-
-### Rollout behavior observed (K4)
-
-Pushed a trivial visible change (`/api/status` response text) through the
-Plan A pipeline and inspected `az containerapp revision list --all`
-afterward:
-
-```
-Rev                       Active    Traffic
-------------------------  --------  -------
-ca-clo25-namnwe--x6bubwc  False     0
-ca-clo25-namnwe--0000001  True      0
-ca-clo25-namnwe--0000002  True      100
-```
-
-The old revisions were **not deleted** — they still exist, just deactivated
-or at 0% traffic, while the newest one holds 100%. This is Container Apps'
-built-in rolling-style behavior: nothing was configured for it, it's the
-default. Compared to week 36's rolling/blue-green/canary distinctions: this
-reads as rolling (one new revision fully replaces traffic, old ones kept
-around rather than both serving simultaneously as blue-green would, and
-without the gradual traffic-split a canary would use) — though Container
-Apps *can* do traffic-splitting across revisions manually if asked to
-(Fördjupning 10 territory).
-
-**The honest limit of the health check here, same shape as week 36's
-lesson**: a green `Health check after deployment` step proves the app
-answers `200` — not that it's the *new* revision answering. If a bad
-revision failed to start, Container Apps would simply keep serving the old
-one at 100% traffic, and the health check would still pass. The only way to
-see that is `revision list`, not the pipeline's own output.
-
-### Two pipelines, one test, run twice (Komp1 reflection)
-
-`dotnet test` now runs in both `deploy.yml` and `deploy-container.yml`,
-independently. Real duplication, but the safer default: if it lived in only
-one, whichever pipeline skipped it would be the one capable of shipping code
-whose tests fail — a test that gates one deploy path and not the other is
-worse than no test, since it teaches that tests are a step in a file rather
-than a gate before any release. The actual fix for the duplication — a
-shared `build`/`test` job, or a reusable workflow both call — is known and
-not built here; recognizing the option is the point, not implementing it
-today.
-
-### Tearing down four resources instead of one
-
-`deploy-infra.sh` only ever knew about the App Service track. Today added a
-registry, a Container Apps environment, and a container app — four resources
-across two scripts, in a strict order (registry before image before app).
-`scripts/provision-all.sh` exists purely to encode that order as a file
-instead of a memory: it calls `deploy-infra.sh`, creates the registry
-directly (since `container.bicep` can't yet — the app inside it needs an
-image that doesn't exist yet), builds the image, then calls
-`deploy-container.sh`. No new logic, just the missing two commands plus the
-two scripts already written, chained. Checked with `bash -n` before ever
-being run for real, since it's the one script in this course committed and
-then torn down out from under before it was ever exercised.
-
-Teardown used `properties.provisioningState` instead of `az group exists`
-this time — a Container Apps environment can take upward of ten minutes to
-empty, and `exists` would just report `true` the whole time with no signal
-that anything is actually progressing. `provisioningState` answers
-`Deleting` mid-flight instead of leaving that ambiguous.
-
-Net effect for next lesson day: `./scripts/provision-all.sh rg-clo25-namn-we
-acrclo25namnwe` first thing, before anything else — the Container Apps
-environment is the slowest thing to create in the whole course, so starting
-it early and reading/writing while it provisions is the way to spend that
-wait, not watching it.
-
-## Secrets and identity: Key Vault + OIDC — lab 06, 2026-09-29
-
-Started the day with the usual teardown recovery (`provision-all.sh`, Del 0),
-then built the security layer on top: a managed identity for the app, a Key
-Vault it reads from, and passwordless login for both pipelines. Everything
-below was done for real against `rg-clo25-namn-we` and torn down at the end
-of the day.
-
-### Del 0 — rebuilding, and two failures that weren't in the script (Komp1)
-
-`./scripts/provision-all.sh rg-clo25-namn-we acrclo25namnwe` (the `-we`
-suffix is this repo's naming, not the `rg-clo25-namn` used in the lab text).
-
-1. **The Git Bash path-mangling bug, fourth symptom.** The script printed
-   `Done. App URL:` and then died with `MissingSubscription` inside the
-   role-assignment block at the end of `deploy-infra.sh` — the
-   `--scope "/subscriptions/..."` argument got rewritten into a Windows path
-   again. Fixed by exporting `MSYS_NO_PATHCONV=1` and re-running (the script
-   is idempotent, so step 1 simply ran again). Two things made this easy to
-   miss: `provision-all.sh ... | tee log` reported **exit code 0** even though
-   the script had failed (the exit code was `tee`'s, not the script's), and
-   steps 2–4 never ran. The pattern from lab 05 holds: any `az` argument
-   starting with a single `/` in Git Bash is suspect.
-2. **The pipeline could not log in: `No subscriptions found`.** Cause: the
-   pipeline identity's `Contributor` role is scoped to the resource group and
-   dies with it, and the block that re-grants it was exactly the part that had
-   crashed in (1). Fixing (1) granted the role — but the re-run of the
-   pipeline *immediately afterwards* still failed the same way, because a new
-   role assignment needs a minute or two to propagate. Confirmed the role
-   existed with `az role assignment list`, waited, re-ran: green. Lesson: a
-   fresh role assignment plus an instant login is a race, and the error
-   (`No subscriptions found`) says nothing about propagation.
-
-A third, harmless one: the first `deploy` run failed its own health check
-(`FAILED: app never responded 200 after 10 attempts`) on a brand-new app;
-`curl` seconds later returned 200. Cold start on a just-created app, same
-false-negative class as the `404`s in lab 05. A re-run of the failed job was
-green.
-
-### A managed identity for the app, and a Key Vault (K1, K2)
-
-`identity: { type: 'SystemAssigned' }` on the web app in `infra/main.bicep`
-(three lines, directly after `location`). `what-if` showed `~ Modify` and did
-**not** list the identity at all — what-if simply doesn't render it, so the
-proof is `az webapp identity show`, which returned a `principalId`. Committed
-straight away: without the change in the template, the identity would exist
-only in the running app and vanish the next time `provision-all.sh` rebuilds
-the app from the checked-in template.
-
-`infra/security.bicep` creates the vault and one secret:
-
-- **`@secure()` on `secretValue`** — without it the value would sit in clear
-  text in the deployment history. `what-if` showed `properties.value:
-  "*******"`, which is the visible proof.
-- **`existing` on the app resource** — same keyword as the registry in
-  `container.bicep`: "it exists, don't create it". It is what lets the
-  template read `app.identity.principalId`.
-- **Two access policies:** the app gets `get`, `list`; I get `get`, `list`,
-  `set`. The app must never be able to write a secret. Verified with
-  `az keyvault show ... accessPolicies` and by comparing the first id to
-  `$APP_PRINCIPAL_ID` — it matched.
-- **`readEnvironmentVariable('SECRET_VALUE')` in `security.bicepparam`** — the
-  parameter file says *where* the value comes from, not *what* it is, so it
-  can be committed. If the variable is missing, the deploy stops with BCP427
-  before anything reaches Azure.
-- The secret value never appeared in a command line. The lab's way is
-  `read -rs` (so it isn't echoed or stored in shell history), with `printf`
-  for the prompt because `read -p` means something else in zsh. A test value
-  (`demo-value-1`) was used, since the value gets printed on screen when
-  verifying access.
-
-**Why access policies and not RBAC (`enableRbacAuthorization: false`) —
-a known, deliberate limitation (K2, Komp2).** RBAC is what Microsoft
-recommends today, but it needs the right to create role assignments *per
-identity*, and role assignments die with the resource group — the same
-problem as the pipeline's `Contributor`. Access policies are declared inside
-the Key Vault resource itself and work with plain `Contributor`. Trade-off
-accepted: less granular and older model, but it works with the permissions
-this subscription actually grants and doesn't add another thing to re-grant
-after every teardown. With the right to assign roles, RBAC would be the
-better choice.
-
-### Letting the app read the secret (K2)
-
-```
-MY_SECRET = @Microsoft.KeyVault(SecretUri=https://kv-clo25-namn-we.vault.azure.net/secrets/demo-secret)
-```
-
-The app setting holds a *reference*, not the secret. The app reads the
-environment variable `MY_SECRET` as usual; App Service fetches the value from
-Key Vault with the app's managed identity at start-up. The URI has no version
-on the end, so it always points at the latest — which is what makes rotation
-possible without redeploying.
-
-Checking that the setting *exists* proves nothing (a perfect-looking
-reference can still fail to resolve, and the app would then get the literal
-string `@Microsoft.KeyVault(...)`). The proof is asking the platform:
-
-```
-az rest --method get --url "https://management.azure.com<app-id>/config/configreferences/appsettings?api-version=2022-03-01"
-```
-
-→ `MY_SECRET  Resolved`. Other statuses (`SecretNotFound`,
-`AccessToKeyVaultDenied`, `VaultNotFound`) name the exact failure.
-
-What is *not* anywhere in the chain from Key Vault to the app: no password in
-the code, the Bicep, GitHub secrets, the app setting, or the shell history.
-The app proves who it is with its identity; Key Vault hands the value to that
-identity only.
-
-**Known limitation (written down on purpose):** the setting was applied with
-`az webapp config appsettings set`, not in Bicep. Two reasons: `security.bicep`
-is only deployed in this lab (a reference in `main.bicep` would point at a
-vault that doesn't exist after a teardown), and `appSettings` in a template
-*replaces all* settings the app has — a template that owns one setting must
-own all of them, and everything set by CLI would vanish on the next deploy
-(the same reason `main.bicep` declares no `appSettings` since lab 04). The
-consequence is that `MY_SECRET` does **not** come back after a rebuild: the
-app answers `200` on `/health`, the pipeline is green, and the reference is
-silently gone (`az webapp config appsettings list` returns `[]`). It is a
-conscious deviation from "everything as code"; next step would be moving the
-app settings into the template.
-
-### OIDC for the pipelines (F2, Komp1, Komp2)
-
-Before: both workflows logged in with `AZURE_CREDENTIALS`, a service
-principal password stored as a GitHub secret. After: GitHub vouches for every
-run ("this is a job in repo X on branch `main`") and Azure trusts the
-voucher — nothing stored anywhere that would still work tomorrow. Password =
-a keycard that works anywhere until someone changes the lock; OIDC = a visitor
-pass issued per run and valid for minutes.
-
-What was built:
-
-1. **A new identity** `gh-clo25-namn-we` (`az ad app create` +
-   `az ad sp create`). Checked with `az ad app list` first, so it wasn't
-   created twice. This lives in Entra ID, not in the resource group, so it
-   survives teardown.
-2. **`Contributor` on the resource group only**, not the subscription — same
-   least-privilege reasoning as lab 04: the role dies with the group, and the
-   role-grant block at the end of `deploy-infra.sh` re-creates it. That's why
-   `SP_NAME` in `deploy-infra.sh` had to be changed to the new identity.
-   I changed it in `deploy-container.sh` too (it has a copy of the same block
-   and would otherwise have granted the role to the old identity).
-3. **A federated credential** (`github-main`) with `issuer
-   https://token.actions.githubusercontent.com`, audience
-   `api://AzureADTokenExchange` and the **subject**:
-   `repo:Xnenon02@228689539/beacon@1339932954:ref:refs/heads/main`.
-   The subject is the whole credential: only runs GitHub vouches for with
-   exactly that string can use the identity — this repo, this branch, nothing
-   else. Note the numeric ids in it: repos created after 2026-07-15 have the
-   account and repo id baked in, while most documentation (including
-   Microsoft Learn) shows the older form without them. Typing it by hand
-   would give `AADSTS700213`. So it was **asked from GitHub**
-   (`gh api repos/{owner}/{repo}/actions/oidc/customization/sub`), not typed.
-4. **Three GitHub *variables*, not secrets** (`AZURE_CLIENT_ID`,
-   `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) — they are identifiers, not
-   passwords. Setting them as secrets works too but makes logs unreadable and
-   blurs the line between an id and a key. They were piped straight from `az`
-   to `gh variable set` so they never went through the screen or clipboard.
-   (The repo also has older *secrets* with similar names from earlier labs;
-   `vars.` and `secrets.` are separate namespaces, so no clash.)
-5. **Both workflow files, in one commit:** `permissions: id-token: write,
-   contents: read` at the top (once `permissions` is set everything else
-   defaults to none, so `contents: read` is needed for `actions/checkout`),
-   and the `creds:` line replaced by `client-id` / `tenant-id` /
-   `subscription-id` in **all four** login steps (`deploy.yml`: `infra`,
-   `deploy`; `deploy-container.yml`: `build-and-push`, `deploy`). Verified
-   with `grep -n AZURE_CREDENTIALS .github/workflows/*.yml` → no output.
-
-Result after pushing to `main`: both pipelines log `Azure CLI login succeeds by
-using OIDC.` and the log shows the exact `subject claim` GitHub sent, which is
-what to compare with the credential if a login ever fails. One
-`No subscriptions found` on the container pipeline's first run — same
-role-propagation race as in Del 0, not an OIDC problem (no `AADSTS` error;
-the token exchange itself had worked) — green after `gh run rerun --failed`.
-
-**`AZURE_CREDENTIALS` is deliberately still there:**
-```
-AZURE_CREDENTIALS behålls tills OIDC bevisats över en rivning,
-inte bara över en push.
-```
-OIDC has been shown to work on a push while the resource group was up. It has
-*not* yet been shown to work on an environment rebuilt from zero with
-`provision-all.sh` and both pipelines green. Deleting the secret first would
-leave no fallback if the role assignment turned out not to come back. Once
-that has been seen: `gh secret delete AZURE_CREDENTIALS`. The other old
-secrets (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZUREAPPSERVICE_*`) are
-also unused by the workflows now and can go at the same time.
-
-### AcrPull instead of the registry password — built, then reverted (Del 2b, K2)
-
-Optional part, done to see it work and undone the same day (the lab says so
-itself). Steps: system-assigned identity on the Container App
-(`az containerapp identity assign`), role `AcrPull` on the registry
-(two-minute wait for propagation), then in `container.bicep`: `identity:
-{ type: 'SystemAssigned' }` on the app, `identity: 'system'` in the
-`registries` entry instead of `username`/`passwordSecretRef`, and the
-`secrets` block plus the unused `registryPasswordSecretName` variable removed.
-
-Verified with `az containerapp show`: `"identity": "system"`, empty
-`username`, `"secrets": null`, `/health` → 200. The Container App pulled its
-image with no password anywhere.
-
-**Why it is better than the admin password:** the admin user is one shared
-username/password that can push, pull and delete for the whole registry; it
-can leak, has to be rotated and lives in the template's output/secret store.
-`AcrPull` gives *only this app* the right to *only pull* from *only this
-registry*, and there is nothing to leak or rotate.
-
-**Why it was reverted:** the `AcrPull` assignment sits on the registry, the
-registry sits in the resource group, and the group is torn down. After the
-next `provision-all.sh` the new registry and the new app identity would have no
-role: no image pull, no active revision, `deploy-container.yml` red — and the
-container track must work for a passing grade. Reverted with
-`git restore infra/container.bicep` (the change was never committed) and a
-re-deploy; afterwards `identity: None`, secret `acr-password` back, `/health`
-200. The orphaned role assignment on the registry does no harm and disappears
-with the group.
-
-### What is left as secrets, and what would replace it (Komp2 summary)
-
-| Where | What | Replaced by |
+| | Web track | Container track |
 |---|---|---|
-| GitHub secret `AZURE_CREDENTIALS` | service principal password | OIDC (built, waiting to be proven over a teardown) |
-| Registry admin user | username + password the Container App pulls with | managed identity + `AcrPull` (built and verified, reverted) |
-| App setting `MY_SECRET` | *not* a secret — a Key Vault reference | already the target design |
+| Runs on | Azure App Service, Linux, plan B1, .NET 10 | Azure Container Apps (consumption), image from Azure Container Registry |
+| Infrastructure as code | `infra/main.bicep` | `infra/container.bicep` |
+| Pipeline | `.github/workflows/deploy.yml` | `.github/workflows/deploy-container.yml` |
+| Scaling | 3 instances (manual scale-out), load balanced by the platform | 1 to 5 replicas, added automatically at 20 concurrent requests per replica |
+| Health check | `healthCheckPath: /health` on the site, plus `scripts/health-check.sh` after each deploy | `scripts/health-check.sh` after each deploy |
 
-### Teardown notes (Del 4)
+The app has three endpoints: `GET /health` (returns `OK`), `GET /api/status`, and `GET /api/games/search?query=...` (searches Steam's public store endpoints, no API key). The function of the app is not the point; the infrastructure around it is.
 
-`az group delete --name rg-clo25-namn-we --yes --no-wait`, followed by
-`az group show --query properties.provisioningState` (`Deleting` = in
-progress, `Borta` = gone). Same reasoning as lab 05: `az group exists` says
-`true` until the very end.
+### Architecture
 
-What **survives** a teardown (lives in Entra ID, not the group): the OIDC
-identity `gh-clo25-namn-we` and its federated credential. What is **lost**:
+```mermaid
+flowchart LR
+  push(["git push to main"]) --> A["deploy.yml"]
+  push --> B["deploy-container.yml"]
+  A -->|"infra job: Bicep"| P["App Service plan: 3 instances"]
+  A -->|"deploy job: zip package"| W["Web app"]
+  P --- W
+  B -->|"az acr build"| R[("Container Registry")]
+  B -->|"az containerapp update"| C["Container App: 1 to 5 replicas"]
+  R -->|"image pull"| C
+  K[("Key Vault")] -.->|"Key Vault reference, managed identity"| W
+```
 
-- the role assignments (pipeline identity `Contributor`, the orphaned
-  `AcrPull`) — the first is re-granted by the block at the end of
-  `deploy-infra.sh`, which is why `SP_NAME` must point at `gh-clo25-namn-we`
-  (checked with `grep -n 'SP_NAME=' scripts/deploy-infra.sh`; if it still says
-  `sp-clo25-namn-we`, the OIDC identity gets no role and *both* pipelines fail
-  with `AuthorizationFailed` after a green login step);
-- `MY_SECRET` (see the known limitation above);
-- the Key Vault. `provision-all.sh` does **not** rebuild it, on purpose: soft
-  delete keeps the name reserved for 7 days after deletion
-  (`softDeleteRetentionInDays: 7`, the minimum; soft delete can't be turned
-  off), and a step that can't be repeated is a bad step in a rebuild script.
-  Scheduled purge for `kv-clo25-namn-we`: 2026-10-06 (from
-  `az keyvault list-deleted`). To bring it back before then, use a new name
-  (e.g. `kv-clo25-namn-we-2`) in `security.bicepparam`, deploy
-  `security.bicep`, and set `MY_SECRET` again. `az keyvault recover` is the
-  right answer in a real project, but it needs subscription-level rights, the
-  resource group must exist first, and the recovered vault comes back with
-  the *old* app's identity in its access policies — the new app would get
-  `Forbidden` from a vault that looks healthy.
+Both workflows sign in to Azure with **OIDC**: GitHub issues a short-lived token for the run, Azure checks it against a federated credential on the pipeline identity, and no password or key is stored anywhere.
 
-What still matters for grading is the write-up above, not a running vault: the
-moment was done, is explained, and the template is in the repo.
+### Terms used in this document
 
-**Two Git Bash reminders** for anyone re-running this on Windows: export
-`MSYS_NO_PATHCONV=1` in every new terminal before touching `--scope`
-arguments, and don't trust the exit code of `script | tee log` — check the log
-for the last expected line (`Both tracks are up.`).
+| Term | Meaning |
+|---|---|
+| web track / container track | the App Service deployment / the Container Apps deployment |
+| instance | one worker machine of the App Service plan (web track) |
+| replica | one running copy of the container in Container Apps (container track) |
+| registry | Azure Container Registry (ACR), where container images are stored |
+| revision | an immutable version of a Container App, created whenever its template (for example the image) changes |
+| pipeline identity | the Entra ID app registration `gh-clo25-<name>-we` that GitHub Actions signs in as |
+| resource group | `rg-clo25-<name>-we`, the single container for every Azure resource below |
+| teardown | deleting the resource group, which deletes everything inside it |
+
+### Repository layout
+
+| Path | What it is |
+|---|---|
+| `src/Beacon.Api/` | the application (`Program.cs`, `Steam/SteamClient.cs`, `wwwroot/`) and its `Dockerfile` |
+| `tests/Beacon.Tests/` | xUnit tests (health endpoint, root page) |
+| `infra/main.bicep` | web track: App Service plan and web app |
+| `infra/container.bicep` | container track: registry, Container Apps environment, container app |
+| `infra/security.bicep` | Key Vault with access policies and one secret |
+| `infra/*.bicepparam` | the parameter file belonging to each template |
+| `scripts/provision-all.sh` | builds the whole environment from nothing, in the order that works |
+| `scripts/deploy-infra.sh`, `scripts/deploy-container.sh` | deploy one template each (both support `--what-if`) |
+| `scripts/health-check.sh` | retries a URL until it answers `200` |
+| `.github/workflows/` | the two pipelines |
+
+### Time and cost
+
+Setting everything up takes roughly 45 minutes the first time (the Container Apps environment is the slowest resource to create, 3 to 5 minutes). While everything is up it costs a few cents per hour, mostly the three B1 instances. Tear everything down when you are done (section A10).
+
+---
+
+# Part A. Step by step
+
+Every command below is run from the repository root in **bash** (Git Bash on Windows, any terminal on Linux or macOS). Commands were run exactly like this to produce the outputs shown.
+
+## A1. Prerequisites
+
+| Tool | Tested with | Check |
+|---|---|---|
+| Azure CLI | 2.85 | `az version` |
+| .NET SDK | 10.0 | `dotnet --version` |
+| GitHub CLI | 2.97 | `gh --version` |
+| bash and perl | Git Bash on Windows 11 (perl ships with it), Linux, macOS | `bash --version` |
+
+Docker is **not** needed: images are built in Azure with `az acr build` (see B1 for why).
+
+You need an Azure subscription where you are allowed to (1) create resource groups, (2) create role assignments on them (Owner or User Access Administrator), and (3) create app registrations in Entra ID. If you cannot do (2) or (3), skip A5 and run the deploy scripts yourself; the assignment accepts running privileged steps manually if the tutorial says so.
+
+Sign in, and register the resource providers that a new subscription may not have used yet (harmless if they already are):
+
+```bash
+az login
+az account show --query "{subscription:name, user:user.name}" -o table
+
+gh auth login                       # needs the scopes repo and workflow
+gh auth status
+
+for ns in Microsoft.ContainerRegistry Microsoft.App Microsoft.KeyVault; do
+  az provider register --namespace "$ns" --wait
+done
+```
+
+**Windows only:** run `export MSYS_NO_PATHCONV=1` in every new terminal. Git Bash rewrites any argument that starts with a single `/` into a Windows path, which makes `az` fail with `MissingSubscription`. The scripts in this repository set it themselves; your own `az` commands do not.
+
+## A2. Get the code and run it locally
+
+Run the app before touching Azure. If something fails later, this tells you whether the app or the deployment is at fault.
+
+```bash
+git clone https://github.com/Xnenon02/beacon.git beacon
+cd beacon
+
+dotnet test --configuration Release     # expect: Passed!  Failed: 0, Passed: 2
+dotnet run --project src/Beacon.Api     # listens on http://localhost:5001
+```
+
+In a second terminal:
+
+```bash
+curl http://localhost:5001/health       # "OK"
+curl http://localhost:5001/api/status   # {"app":"Beacon","status":"running"}
+curl "http://localhost:5001/api/games/search?query=dota"   # a JSON list of games
+```
+
+Open `http://localhost:5001/` for the search page. Stop the app with Ctrl+C.
+
+## A3. Choose your names
+
+Several Azure names must be globally unique, so everything is built from one short name of your own: 3 to 12 lowercase letters or digits, starting with a letter. The repository ships with the author's placeholder `namn`.
+
+```bash
+export NAME=alice                      # <- your own name here
+
+export RG=rg-clo25-$NAME-we            # resource group
+export PLAN=asp-clo25-$NAME-we         # App Service plan
+export APP=app-clo25-$NAME-we          # web app (becomes <APP>.azurewebsites.net)
+export ACR=acrclo25${NAME}we           # container registry: letters and digits only
+export CAPP=ca-clo25-${NAME}we         # container app
+export IDENT=gh-clo25-$NAME-we         # pipeline identity in Entra ID
+export VAULT=kv-clo25-$NAME-we         # key vault (24 characters at most)
+
+export LOCATION=westeurope             # the Azure region, see the note below
+```
+
+These variables only live in this terminal. **Run this block again in every new terminal.**
+
+**The region.** `LOCATION` decides where the resource group is created, and every resource inherits the group's region. The `-we` in the names is only part of the name (it started as "West Europe"); it does not have to match the region. Whether a region accepts new B1 plans depends on your subscription and on the day: capacity runs out (C-1), quota can be zero (C-2), and a region can be closed to new resources for a subscription altogether (C-3). If provisioning in A6 fails for that reason, delete the empty group, export another region (for example `swedencentral`) and run A6 again.
+
+Now replace the placeholder in the eight files that contain names, and check that none is left:
+
+```bash
+perl -pi -e "s/namn/$NAME/g" \
+  infra/main.bicepparam infra/container.bicepparam infra/security.bicepparam \
+  .github/workflows/deploy.yml .github/workflows/deploy-container.yml \
+  scripts/deploy-infra.sh scripts/deploy-container.sh scripts/provision-all.sh
+
+grep -rn namn infra .github scripts || echo "no placeholders left"
+```
+
+## A4. Create your own GitHub repository
+
+Do this now, before the first push: the next step needs the repository to exist, and the first push will start both pipelines, which must not run before Azure is ready.
+
+```bash
+rm -rf .git                            # drop the author's history, start your own
+git init -b main
+gh repo create beacon --public --source=. --remote=origin
+```
+
+(`--public` lets anyone read it. A private repository works too if the person assessing it is added as a collaborator.) Nothing is pushed yet.
+
+## A5. Create the pipeline identity (one time)
+
+The pipelines need an identity in Azure. Instead of a password, it gets a **federated credential**: Azure will trust a token only if GitHub issued it for exactly this repository and the `main` branch.
+
+First check whether it already exists (it survives teardown, so you only create it once):
+
+```bash
+az ad app list --display-name "$IDENT" --query "[].appId" -o tsv
+```
+
+If that printed an id, set `CLIENT_ID` to it and skip to the variables below. Otherwise:
+
+```bash
+# 1. The identity: an app registration plus its service principal
+CLIENT_ID=$(az ad app create --display-name "$IDENT" --query appId -o tsv)
+az ad sp create --id "$CLIENT_ID" -o none
+
+# 2. Ask GitHub which "subject" it will put in the token. Do not type it by
+#    hand: repositories created after July 2026 include numeric account and
+#    repository ids in it, and the older form shown in most documentation
+#    fails with AADSTS700213.
+SUB_PREFIX=$(gh api repos/{owner}/{repo}/actions/oidc/customization/sub --jq .sub_claim_prefix)
+echo "$SUB_PREFIX"                     # repo:<owner>@<id>/<repo>@<id>
+
+# 3. The federated credential: only runs on the main branch of this repository
+cat > credential.json <<EOF
+{
+  "name": "github-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "${SUB_PREFIX}:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}
+EOF
+az ad app federated-credential create --id "$CLIENT_ID" --parameters credential.json -o none
+rm credential.json
+```
+
+Give the workflows the three identifiers they need. These are **variables, not secrets**: they identify the identity but cannot be used to sign in.
+
+```bash
+gh variable set AZURE_CLIENT_ID       --body "$CLIENT_ID"
+gh variable set AZURE_TENANT_ID       --body "$(az account show --query tenantId -o tsv)"
+gh variable set AZURE_SUBSCRIPTION_ID --body "$(az account show --query id -o tsv)"
+gh variable list
+```
+
+No role is granted yet, on purpose: a role is granted on a resource group, which does not exist yet. The deploy scripts grant it in the next step (explained in B4).
+
+## A6. Provision the infrastructure
+
+One command builds both tracks, in the order Azure requires:
+
+```bash
+./scripts/provision-all.sh "$RG" "$ACR"
+```
+
+| Step | What it does | Why this order |
+|---|---|---|
+| 1/4 | `deploy-infra.sh`: creates the resource group, deploys `infra/main.bicep` (App Service plan with 3 instances, web app), grants the pipeline identity `Contributor` on the group | everything else lives in the group |
+| 2/4 | `az acr create`: the registry | an image cannot be pushed to a registry that does not exist |
+| 3/4 | `az acr build`: builds the Dockerfile in Azure and pushes `beacon:v1` | a Container App that points at a missing image fails to deploy |
+| 4/4 | `deploy-container.sh`: deploys `infra/container.bicep` (the registry again, now unchanged, plus the Container Apps environment and the container app) | needs the image from step 3 |
+
+It takes 10 to 15 minutes and ends with `Both tracks are up.` Check what exists:
+
+```bash
+az resource list -g "$RG" --query "[].{Name:name, Type:type}" -o table
+az role assignment list -g "$RG" --assignee "$CLIENT_ID" -o table    # Contributor, scope = the group
+```
+
+You should see the plan, the web app, the registry, the Container Apps environment and the container app, and one `Contributor` assignment for the pipeline identity. The web app is **empty** at this point (the infrastructure exists, the code does not); the pipeline deploys the code next.
+
+## A7. Deploy the application with the pipelines
+
+A new role assignment needs a minute or two to propagate. Wait, then push. The push starts both workflows:
+
+```bash
+sleep 120
+git add -A
+git commit -m "Beacon: app, infrastructure and pipelines"
+git push -u origin main
+
+gh run list --limit 4
+gh run watch "$(gh run list --workflow deploy.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+gh run watch "$(gh run list --workflow deploy-container.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+What each pipeline does (the reasoning is in B3):
+
+- **`deploy.yml`**: jobs `infra` and `build` run in parallel (`infra` re-applies `main.bicep`; `build` builds, tests and publishes). `deploy` waits for both, signs in, deploys the package to the web app, and runs `scripts/health-check.sh` against `/health`.
+- **`deploy-container.yml`**: `build-and-push` runs the tests, then `az acr build` tags the image with the commit SHA. `deploy` rolls out a new revision with that tag and runs the health check against the Container App.
+
+If a run fails with `No subscriptions found` or a health check that never answered, it is almost always a timing problem on a fresh environment (C-5, C-6): wait a minute and run `gh run rerun <run-id> --failed`.
+
+To start a pipeline by hand (needed after every teardown, because a rebuilt web app is empty): `gh workflow run deploy.yml` and `gh workflow run deploy-container.yml`.
+
+## A8. Verify both tracks
+
+A green pipeline only proves the YAML ran. Ask Azure and the app directly. Never type a host name from memory; ask for it.
+
+**Web track**
+
+```bash
+HOST=$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv)
+./scripts/health-check.sh "https://$HOST/health"          # OK: app responded 200
+curl -s "https://$HOST/api/status"
+
+az appservice plan list -g "$RG" --query "[].{Plan:name, Sku:sku.name, Instances:sku.capacity}" -o table
+az webapp show -g "$RG" -n "$APP" \
+  --query "{httpsOnly:httpsOnly, minTls:siteConfig.minTlsVersion, healthCheck:siteConfig.healthCheckPath, alwaysOn:siteConfig.alwaysOn}" -o json
+```
+
+Expect one plan, SKU `B1`, `3` instances; `httpsOnly: true`, TLS `1.3`, health check path `/health`.
+
+**Container track**
+
+```bash
+FQDN=$(az containerapp show -g "$RG" -n "$CAPP" --query properties.configuration.ingress.fqdn -o tsv)
+./scripts/health-check.sh "https://$FQDN/health"
+curl -s "https://$FQDN/api/status"
+
+az containerapp show -g "$RG" -n "$CAPP" --query properties.template.scale -o json
+az containerapp replica list -g "$RG" -n "$CAPP" --query "[].name" -o tsv
+az containerapp revision list -g "$RG" -n "$CAPP" --all \
+  --query "[].{Revision:name, Active:properties.active, Traffic:properties.trafficWeight}" -o table
+az containerapp show -g "$RG" -n "$CAPP" --query "properties.template.containers[0].image" -o tsv
+```
+
+Expect `minReplicas: 1`, `maxReplicas: 5` and an `http-scaling` rule with `concurrentRequests: 20`. The running image tag must equal the commit that was just pushed (`git rev-parse HEAD`): that is the proof that the pipeline deployed the new code, not only that it went green. The revision list shows the previous revision kept next to the new one that holds the traffic.
+
+## A9. Secrets with Key Vault (security walkthrough)
+
+This part shows how a secret reaches the web app without being stored in the repository, the pipeline, or the app configuration. It is not part of `provision-all.sh`; see B4 for why.
+
+The web app already has a **system-assigned managed identity** (`identity: SystemAssigned` in `main.bicep`). `infra/security.bicep` creates a vault whose access policy lets that identity read secrets (`get`, `list`) and lets you write them. Your object id and the secret value are read from environment variables, so nothing personal or secret is committed:
+
+```bash
+export DEPLOYER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv)
+printf 'Secret value (not echoed): '; read -rs SECRET_VALUE; echo; export SECRET_VALUE
+
+az deployment group create \
+  --name "security-$(date +%Y%m%d-%H%M%S)" \
+  --resource-group "$RG" \
+  --template-file infra/security.bicep \
+  --parameters infra/security.bicepparam \
+  --query properties.outputs -o json
+```
+
+Point an app setting at the secret. The setting holds a **reference**, not the value; App Service fetches the value from Key Vault with the app's identity when the app starts. The URI has no version, so it always resolves to the latest one:
+
+```bash
+az webapp config appsettings set -g "$RG" -n "$APP" \
+  --settings "MY_SECRET=@Microsoft.KeyVault(SecretUri=https://$VAULT.vault.azure.net/secrets/demo-secret)" -o none
+```
+
+A setting that exists proves nothing: if the reference cannot be resolved the app silently receives the literal text `@Microsoft.KeyVault(...)`. Ask the platform whether it resolved:
+
+```bash
+APP_ID=$(az webapp show -g "$RG" -n "$APP" --query id -o tsv)
+az rest --method get \
+  --url "https://management.azure.com${APP_ID}/config/configreferences/appsettings?api-version=2022-03-01"
+```
+
+The entry for `MY_SECRET` should have status `Resolved`. Other statuses name the failure exactly (`SecretNotFound`, `AccessToKeyVaultDenied`, `VaultNotFound`).
+
+## A10. Tear everything down, and bring it back
+
+When you are done for the day, delete the resource group. Everything inside it goes with it:
+
+```bash
+az group delete --name "$RG" --yes --no-wait
+az group show --name "$RG" --query properties.provisioningState -o tsv 2>/dev/null || echo "Gone"
+```
+
+`Deleting` means it is in progress and will finish without you. Use `provisioningState` rather than `az group exists`: a Container Apps environment can take ten minutes to empty and `exists` answers `true` the whole time.
+
+**What survives** (it lives outside the group): the pipeline identity, its federated credential, the GitHub variables, the repository. **What is lost:** the role assignment (the next `provision-all.sh` grants it again), the registry and its images, the Key Vault and `MY_SECRET`. A deleted Key Vault keeps its name reserved for 7 days (soft delete), so use a new `VAULT` name if you want one sooner.
+
+To bring it all back: run the name block from A3, then
+
+```bash
+./scripts/provision-all.sh "$RG" "$ACR"
+sleep 120
+gh workflow run deploy.yml
+gh workflow run deploy-container.yml
+```
+
+`provision-all.sh` restores the infrastructure only; the web app stays empty until a pipeline deploys the code.
+
+---
+
+# Part B. Design and reasoning
+
+## B1. Azure services, and why
+
+| Service | Used for | Why this one |
+|---|---|---|
+| **App Service** (Linux, B1) | web track | A managed platform for web apps: no operating system to patch, a built-in load balancer across instances, a health check setting, deployment from a zip. B1 is the cheapest tier that can run more than one instance (the free and shared tiers cannot scale out), which is what the assignment requires. |
+| **Container Apps** | container track | Runs containers without running a cluster. Gives revisions, HTTPS ingress with load balancing across replicas, and request-based autoscaling out of the box, which is exactly the scaling story the web track lacks on B1. |
+| **Container Registry** (Basic) | image storage | The Container App needs a place to pull the image from. Basic is enough: one image, no geo-replication. |
+| **Key Vault** | secrets | One place to keep a secret and control who may read it, so no secret has to be copied into app settings or pipelines. |
+| **Entra ID** (app registration with federated credential) | pipeline identity | Lets GitHub Actions deploy without a stored password (B4). |
+| **Bicep** | infrastructure as code | Azure's own declarative language: no extra tool or state file to manage, and `what-if` shows the change before anything happens. |
+| **GitHub Actions** | CI/CD | The code already lives on GitHub, it is free for public repositories, and it is what the runner image and scripts here are written for. |
+
+**Why images are built with `az acr build` and not `docker build`.** Docker Desktop could not run on the author's machine: it is school-managed and virtualization is locked at policy level ("Virtualization support not detected, contact your IT admin"). `az acr build` sends the build context to Azure and builds there, so no local Docker is needed. It takes the same `--file` and build-context arguments as `docker build`. It also simplifies the pipeline: the runner needs no registry password, only the OIDC login it already has. The cost is that there is no local `docker run` smoke test; the first real test of an image is the deployed Container App.
+
+## B2. Scaling and load balancing, in both tracks
+
+**Web track: fixed capacity, platform load balancing.** The plan runs `3` instances (`instanceCount` in `infra/main.bicepparam`, the maximum B1 allows, set by `sku.capacity` in the template). App Service's front end spreads requests across the instances. This is **manual scale-out**: B1 supports setting the number of instances by hand (`az appservice plan update --number-of-workers`, or changing the parameter and redeploying), but rule-based autoscale needs the Standard tier or higher. Setting the count in the template means it is a decision recorded in Git instead of something someone once typed in a terminal. One detail to know: sites created this way have **ARR affinity** switched on by default (a cookie that pins a client to one instance), so load is spread per client rather than per request; for a stateless API it could be switched off.
+
+**Container track: a range and a rule.** The container app runs between `minReplicas: 1` and `maxReplicas: 5`, with an `http-scaling` rule of `concurrentRequests: 20`: when the average number of concurrent requests per replica passes 20, Container Apps starts another replica, up to five, and removes them again when the load drops. Ingress distributes requests across the running replicas. The minimum of 1 avoids cold starts (setting it to 0 would scale to zero and cost nothing when idle, at the price of a delay on the first request). The numbers are reasonable starting values for a small stateless API; they were **not load-tested**, so treat them as a starting point, not a measurement. Under a real traffic spike this is the track that reacts on its own; the web track would need a manual `--number-of-workers` change or a move to Standard.
+
+**State: each instance and replica has its own memory.** `SteamClient` caches Steam responses in `IMemoryCache` (search results 5 minutes, app details 6 hours, player counts 60 seconds). That cache exists *per instance or replica*: with 3 instances and up to 5 replicas there are up to 8 independent caches that do not know about each other. Effects: more calls to Steam than a shared cache would make, and two requests can briefly show different player counts. That is acceptable here because the cached data is read-only and non-critical (a stale player count is a freshness trade-off, not a wrong result). The same problem would be a real bug for anything the app *writes*: a counter or a file on disk would also exist once per instance. Shared state would have to move to an external store such as a database or a shared cache, which is out of scope for this assignment.
+
+## B3. Deployment strategy
+
+**Web track: in-place deployment to a single production site, with a health gate.** `azure/webapps-deploy` uploads the build output as a package and App Service restarts the site on it. The pipeline order is: `infra` and `build` in parallel (neither depends on the other), `deploy` only after both succeed (`needs: [build, infra]`, so code is never deployed to a plan that does not exist yet), then `scripts/health-check.sh` retries `/health` for about 45 seconds and fails the run if the app never answers `200`. Blue-green with a slot swap is the usual alternative, but **deployment slots need the Standard tier**, which B1 is not. The health check on the site additionally makes App Service take an instance that keeps failing `/health` out of the load-balancer rotation.
+
+**Container track: a new immutable revision per commit.** Each push builds one image tagged with the commit SHA (and `latest`), then `az containerapp update --image <registry>/beacon:<sha>` creates a new revision. Container Apps runs in *single-revision mode* (the default): traffic moves to the new revision once it is ready and the previous revision is kept, deactivated, next to it. That is a rolling replacement without downtime, and a rollback is another `az containerapp update` with an older SHA. The **commit SHA as tag is the most important line of the workflow**: Container Apps only creates a revision when the template changes, so pushing a new image to the same `:latest` tag would change nothing and the pipeline would go green while the app kept running old code.
+
+**Why the pipelines own different things.** The web pipeline re-applies its Bicep template on every push (`infra` job): the template does not depend on the code, so re-applying is idempotent and keeps drift out. The container pipeline does **not** run `container.bicep`, because that template pins `containerImage` to `:v1`; running it on every push would roll the app back to `v1` each time. So the image is owned by the pipeline (`az containerapp update`), and the template is only run by a person through `deploy-container.sh` when the *infrastructure* changes (scaling, port, size). Running that script after a deployment does roll the app back to `v1` until the next push. Two things deciding which image runs is a known weakness (B6).
+
+**The limit of the health check.** After a Container App rollout the check proves that *an* instance answers `200`, not that the *new revision* does: if the new revision failed to start, Container Apps keeps routing to the old one and the check still passes. The only way to see that is `az containerapp revision list`, which is why A8 compares the running image tag to the commit.
+
+## B4. Security design
+
+| Concern | What was done | Why |
+|---|---|---|
+| **Pipeline authentication** | OIDC with a federated credential on `gh-clo25-<name>-we`. Nothing secret is stored in GitHub; only three identifiers (client, tenant, subscription id) are kept as repository *variables*. | A stored password works anywhere, for anyone who obtains it, until someone rotates it. A federated token is issued per run, lives for minutes, and Azure only accepts it for the exact subject `repo:<owner>/<repo>:ref:refs/heads/main`: this repository, this branch, nothing else. A pull request or another branch cannot sign in. |
+| **Least privilege** | The identity has `Contributor` on **one resource group**, not on the subscription. The workflows request only `id-token: write` and `contents: read`. | If the pipeline were compromised it could change this one group, not the subscription. The price: a role assignment belongs to its scope and **is deleted with the resource group**, so after every teardown it must be granted again. The scripts do that (the block at the end of `deploy-infra.sh`). The pipeline cannot re-grant it for itself, which is correct: an identity that could assign its own roles would defeat the purpose. |
+| **Application secrets** | The web app has a system-assigned managed identity; Key Vault grants that identity `get` and `list` only. The app setting holds a Key Vault *reference*. The secret value was passed in through an environment variable (`@secure()` in the template, `readEnvironmentVariable` in the parameter file), so it is not in Git and shows as `*******` in `what-if` and deployment history. | The app proves who it is with its identity; no password exists to leak. Read-only for the app means a compromised app cannot overwrite secrets. |
+| **Key Vault permission model** | Access policies (`enableRbacAuthorization: false`), a deliberate trade-off. | RBAC is the recommended model, but it needs a role assignment per identity, and role assignments die with the resource group (the same problem as above). Access policies live inside the vault resource and work with plain `Contributor`. Less granular and older, but it works with the rights this subscription grants. With the right to assign roles, RBAC would be the better choice. |
+| **Registry access** | The registry has its **admin user enabled**; the Container App pulls the image with that username and password, stored as a Container App secret and read at deploy time with `acr.listCredentials()` (never typed, never in Git). | A conscious trade-off: it is the simplest working setup, but it is one shared credential that can push, pull and delete for the whole registry. The better design (a managed identity with the `AcrPull` role, no password at all) was **built and verified** and then **reverted**: its role assignment sits on the registry inside the resource group, so after a teardown the rebuilt app would have no right to pull its image and the container track would not start. With the right to assign roles from the provisioning script, this is the first thing to change. |
+| **Transport** | `httpsOnly: true` and a TLS floor of 1.3 on the web app; `allowInsecure: false` on the Container App ingress (HTTP is redirected to HTTPS). | Nothing is served unencrypted. TLS 1.3 is a real restriction: a client that only speaks TLS 1.2 is refused. |
+| **Network** | No restrictions: both apps are public on purpose (they are public APIs), and the vault and registry are reachable over the internet but require authentication. | The assignment asks for identity *or* network limits, and identity was the focus. Next step: Key Vault firewall or private endpoint, and private link for the registry (needs the Premium tier). |
+| **Repository hygiene** | Nothing personal or secret is committed: identifiers are GitHub variables, the deployer's object id and the secret value are read from environment variables, and `publish-profile.xml`-style files are git-ignored. | The repository is public. |
+
+**A secret that is not rebuilt, on purpose.** `provision-all.sh` does not deploy the Key Vault, and `MY_SECRET` is set with a CLI command, not in Bicep. A vault that is deleted keeps its name for 7 days (soft delete cannot be turned off), so a rebuild script that creates it would fail on the second run. And `appSettings` in a template **replaces all** settings of the app, so a template that owns one setting must own every setting, otherwise everything set by hand disappears at the next deploy. The consequence: after a rebuild, the app answers `200`, the pipeline is green, and `MY_SECRET` is silently gone. It is a conscious deviation from "everything as code"; the next step is to move all app settings and the vault into the templates.
+
+## B5. Alternatives considered
+
+| Decision | Chosen | Considered, and why not |
+|---|---|---|
+| Web hosting | App Service | **Virtual machines**: full control but patching, scaling and load balancing become my job. **Static Web Apps / Functions**: do not fit a general web API with the same app for both tracks. |
+| Container hosting | Container Apps | **AKS**: powerful, but a cluster to operate is far more than a small stateless API needs. **Container Instances**: runs a container but has no revisions, autoscaling or managed ingress. **App Service for Containers**: would reuse the same plan model as the web track and show nothing new about container-native scaling. |
+| Infrastructure as code | Bicep | **Terraform**: cloud-neutral and widely used, but adds a tool, a provider and a state file to protect, for a project that only targets Azure. **ARM JSON**: the same engine, far harder to read. **Imperative `az` scripts**: cannot describe the desired state or preview a change; they drift. |
+| CI/CD | GitHub Actions | **Azure DevOps Pipelines**: a second service and sign-in for code that already lives on GitHub. |
+| Pipeline login | OIDC federated credential | **Publish profile** (used first): a key tied to one app instance, dead after every rebuild, and it can only upload code, not create resources. **Service principal secret** (`AZURE_CREDENTIALS`, used next): works, but it is a stored password. Both were used and replaced; the secret was kept as a fallback until OIDC had been shown to work after a teardown and rebuild, then removed. |
+| Image build | `az acr build` | **Local `docker build`**: not possible on this machine. **`docker build` and `docker push` on the runner**: works, but needs the registry password as a pipeline secret. |
+| Deployment strategy | In-place on the web track, revisions on the container track | **Slot swap (blue-green)**: needs Standard. **Canary / traffic split**: Container Apps supports it with multiple active revisions; more configuration than a small API with a health gate needs. |
+| Secret store | Key Vault with managed identity | **GitHub or app settings holding the value**: the secret would be copied into places that cannot be audited or rotated centrally. |
+| Vault permissions | Access policies | **RBAC**: preferred in general, blocked here by the need to assign roles per identity (B4). |
+| Registry credentials | Admin user | **Managed identity with `AcrPull`**: better, built, reverted (B4). |
+
+## B6. Known limitations and next steps
+
+- **No load test.** Scaling is configured and verified as configuration; the 20 concurrent requests per replica and the replica range are starting values, not measured limits.
+- **The web track cannot autoscale** on B1. Next step: Standard tier with an autoscale rule, which also unlocks deployment slots.
+- **ARR affinity is on** for the web app; for a stateless API it could be disabled (`clientAffinityEnabled: false`) for evenly spread load.
+- **No explicit probes on the container.** The Container App relies on the platform's defaults; `/health` is only used by the pipeline's check. Next step: HTTP liveness and readiness probes on `/health`, so a new replica only receives traffic when it is healthy.
+- **No monitoring.** No Log Analytics workspace, alerts or dashboards are configured.
+- **Two things decide which image runs** (the template's `:v1` and the pipeline's commit SHA); running `deploy-container.sh` after a deployment rolls the app back to `v1`. Next step: have the template read the current image instead of pinning one.
+- **The registry is defined twice**: created with `az acr create` in `provision-all.sh` (it must exist before the first image) and declared in `container.bicep`, which then finds it unchanged. It works, but it is duplication.
+- **Registry admin user and public network access** (B4), and **Key Vault, `MY_SECRET` and the `AcrPull` role are not part of the rebuild** (B4).
+- **A fresh role assignment takes a minute or two to work**, and nothing in the scripts waits for it (C-5).
+- **Regions come and go per subscription.** West Europe worked on one day and was closed to new resources a week later; the scripts take the region from `LOCATION`, but nothing checks in advance that a region will accept the deployment (C-3).
+- **Tests are minimal**: two tests (health endpoint, root page). The pipeline gate exists; coverage of the API is thin.
+
+---
+
+# Part C. Troubleshooting
+
+Each of these happened while building this. Symptom, cause, fix.
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| C-1 | `No available instances to satisfy this request` when creating the plan | Transient capacity shortage for B1 in that region | Retry a few minutes later. Not the same as the next row. |
+| C-2 | `Operation cannot be completed without additional quota. Current Limit (B1 VMs): 0` | The subscription has no B1 quota in that region (not transient) | Use another region (`LOCATION=... ./scripts/provision-all.sh ...`) or request quota. |
+| C-3 | `RequestDisallowedByAzure ... The selected region is currently not accepting new customers` | The region is closed to new resources for this subscription (worked earlier, stopped working). The resource group is created but stays empty. `az appservice list-locations` still lists the region, so it cannot warn you. | Delete the empty group (`az group delete -n "$RG" --yes`), `export LOCATION=swedencentral` (or another region), run A6 again. A resource group's region cannot be changed, which is why it must be recreated. |
+| C-4 | `MissingSubscription`, or a path like `C:/Program Files/Git/subscriptions/...` in an error | Git Bash on Windows rewrote an argument starting with `/` | `export MSYS_NO_PATHCONV=1` (the scripts do it themselves). Hit four times in four different places: any `az` argument starting with a single `/` is suspect. |
+| C-5 | Pipeline login fails with `No subscriptions found` right after provisioning | The role assignment was just created and has not propagated, or it is missing | Check `az role assignment list -g "$RG" --assignee "$CLIENT_ID" -o table`; if it is there, wait two minutes and `gh run rerun <id> --failed`. |
+| C-6 | `deploy` fails with `FAILED: app never responded 200 after 10 attempts`, or ten `404`s | Cold start or restart of a freshly created or reconfigured app takes longer than the check's 45 seconds | `curl` the URL a minute later; if it answers `200`, re-run the failed job. |
+| C-7 | Login is green but the next step fails with `AuthorizationFailed` | The identity has no role on the (new) resource group, or `SP_NAME` in the scripts does not match your `IDENT` | `grep -n 'SP_NAME=' scripts/*.sh` must show your identity name; run `./scripts/deploy-infra.sh "$RG"` again, which grants the role. |
+| C-8 | `AADSTS700213` or "no matching federated identity record" on login | The subject in the federated credential does not match what GitHub sends | Recreate the credential with the subject from `gh api repos/{owner}/{repo}/actions/oidc/customization/sub` (A5). The run log prints the exact `subject claim` it sent. |
+| C-9 | `MissingSubscriptionRegistration` | A resource provider was never used in this subscription | `az provider register --namespace Microsoft.App --wait` (also `Microsoft.ContainerRegistry`, `Microsoft.KeyVault`). |
+| C-10 | `Website with given name ... already exists`, or the registry name is rejected | Names are globally unique; registry names allow only lowercase letters and digits | Pick another `NAME` and redo A3. `az acr check-name --name <name> -o table` checks a registry name. |
+| C-11 | Container App deployment fails with `ImagePullFailure` or `manifest unknown` | The image or tag does not exist in the registry yet | `az acr repository show-tags --name "$ACR" --repository beacon -o table`. Order is registry, image, app. |
+| C-12 | `RequestDisallowedByPolicy` on the registry | The subscription forbids `adminUserEnabled: true` | Set it to `false`; then the Container App needs the managed-identity route from B4. |
+| C-13 | `BCP427` when deploying `security.bicep` | `DEPLOYER_OBJECT_ID` or `SECRET_VALUE` is not set in this terminal | Export both (A9). |
+| C-14 | Key Vault name rejected after a teardown | A deleted vault keeps its name for 7 days | Use a new `VAULT` name. |
+| C-15 | `az` shows `null` for the plan id of a web app | An older Azure CLI names the field `appServicePlanId` instead of `serverFarmId` | `az upgrade`, or use the old field name. |
+| C-16 | A teardown or provisioning log shows success, but steps are missing | `script ... \| tee log` reports the exit code of `tee`, not of the script | Look for the script's last line (`Both tracks are up.`) instead of the exit code. |
+| C-17 | `git push` is rejected for `.github/workflows/...` | The `gh` token lacks the `workflow` scope | `gh auth refresh -h github.com -s workflow`, then `gh auth setup-git`. |
+| C-18 | `az acr build` fails with `ParentResourceNotFound ... listBuildSourceUploadUrl` right after the registry was created | The build service does not see a registry that is only seconds old (eventual consistency). The registry does exist. | Run the command again after a few seconds. `provision-all.sh` retries by itself, up to five times. |
+| C-19 | Docker commands fail with `docker: command not found` or "Virtualization support not detected" | Docker Desktop cannot run on this machine | Use `az acr build` (B1); there is no local `docker run`. |
+| C-20 | `az deployment group create` ends with `DeploymentNotFound: Deployment ... could not be found` | The CLI asked for the status of a deployment that Azure Resource Manager had not registered yet (eventual consistency). The deployment itself usually succeeds. | `az deployment group list -g "$RG" -o table` shows the real state. Every script is idempotent, so simply run the same command again. |
+
+---
+
+# Part D. Checklist against the assignment
+
+| Requirement | Where it is |
+|---|---|
+| Same app deployed to App Service and to Container Apps | Overview; A6, A7 |
+| Infrastructure as code for both | `infra/main.bicep`, `infra/container.bicep` (`infra/security.bicep` for the vault) |
+| Built and deployed by GitHub Actions, both tracks | `.github/workflows/deploy.yml`, `.github/workflows/deploy-container.yml`; A7 |
+| Designed for scale (instances, replicas, rules) | 3 instances; 1 to 5 replicas with an HTTP rule; B2 |
+| A `Dockerfile` | `src/Beacon.Api/Dockerfile` |
+| At least one own shell script beyond the workflows | `scripts/provision-all.sh`, `deploy-infra.sh`, `deploy-container.sh`, `health-check.sh` |
+| One documentation file | this file |
+| Which services and why | B1 |
+| Scaling and load balancing in both tracks | B2 |
+| Deployment strategy and why it fits | B3 |
+| Step by step from an empty repository and resource group | Part A |
+| Security design (secrets, identities, restrictions, why) | B4, A9 |
+| Alternatives considered | B5 |
+| State kept per instance or replica | B2 |
+| Honest limits and next steps | B6 |
+
+## Verification status
+
+_(filled in after the end-to-end run, see below)_

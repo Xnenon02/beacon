@@ -8,7 +8,8 @@ on:
       - '**.md'
   workflow_dispatch:
 
-# New: lets every job ask GitHub for an OIDC token
+# Lets every job ask GitHub for an OIDC token, which azure/login exchanges for
+# an Azure access token. No password or key is stored anywhere.
 permissions:
   id-token: write
   contents: read

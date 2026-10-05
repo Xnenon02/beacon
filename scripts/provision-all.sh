@@ -9,6 +9,9 @@
 #   ./scripts/provision-all.sh rg-clo25-namn acrclo25namn v2
 set -euo pipefail
 
+# See deploy-infra.sh: stops Git Bash on Windows from rewriting "/..." arguments.
+export MSYS_NO_PATHCONV=1
+
 RESOURCE_GROUP="${1:?Provide the resource group as the first argument}"
 ACR_NAME="${2:?Provide your ACR name as the second argument}"
 IMAGE_TAG="${3:-v1}"
@@ -30,11 +33,24 @@ az acr create \
   --output none
 
 echo "== 3/4 Image: the registry was torn down, so the image went with it =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "beacon:$IMAGE_TAG" \
-  --file src/Beacon.Api/Dockerfile \
-  .
+# A registry created seconds ago is sometimes not yet visible to the build
+# service, which then fails with ParentResourceNotFound. Retry before giving up.
+ATTEMPTS=5
+for attempt in $(seq 1 "$ATTEMPTS"); do
+  if az acr build \
+    --registry "$ACR_NAME" \
+    --image "beacon:$IMAGE_TAG" \
+    --file src/Beacon.Api/Dockerfile \
+    .; then
+    break
+  fi
+  if [ "$attempt" -eq "$ATTEMPTS" ]; then
+    echo "az acr build failed $ATTEMPTS times. Giving up." >&2
+    exit 1
+  fi
+  echo "Build failed (attempt $attempt of $ATTEMPTS). Retrying in 15 s..."
+  sleep 15
+done
 
 echo "== 4/4 Container track: registry (already there), environment and container app =="
 ./scripts/deploy-container.sh "$RESOURCE_GROUP"

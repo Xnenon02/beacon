@@ -29,7 +29,7 @@ var healthCheckPath = '/health'
 resource plan 'Microsoft.Web/serverfarms@2025-03-01' = {
   name: planName
   location: location
-  kind: 'linux' // what --is-linux made the plan in week 35
+  kind: 'linux' // a Linux plan, same as az appservice plan create --is-linux
   sku: {
     name: skuName
     capacity: instanceCount
@@ -45,7 +45,7 @@ resource app 'Microsoft.Web/sites@2025-03-01' = {
   identity: {
     type: 'SystemAssigned'
   }
-  kind: 'app,linux' // exactly the "kind" read off in Step 1
+  kind: 'app,linux' // a Linux web app
   properties: {
     serverFarmId: plan.id
     httpsOnly: true

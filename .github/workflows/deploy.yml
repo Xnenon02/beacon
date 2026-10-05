@@ -9,7 +9,8 @@ on:
       - '**.http'
   workflow_dispatch:
 
-# New: lets every job ask GitHub for an OIDC token
+# Lets every job ask GitHub for an OIDC token, which azure/login exchanges for
+# an Azure access token. No password or key is stored anywhere.
 permissions:
   id-token: write
   contents: read
@@ -17,7 +18,7 @@ permissions:
 env:
   AZURE_WEBAPP_NAME: app-clo25-namn-we
   AZURE_WEBAPP_HOSTNAME: app-clo25-namn-we.azurewebsites.net
-  AZURE_RESOURCE_GROUP: rg-clo25-namn-we      # new this week
+  AZURE_RESOURCE_GROUP: rg-clo25-namn-we
   DOTNET_VERSION: '10.0.x'
 
 jobs:
@@ -69,7 +70,7 @@ jobs:
           path: artifacts/publish
 
   deploy:
-    needs: [build, infra]     # was: needs: build
+    needs: [build, infra]     # the plan and app must exist before code is deployed
     runs-on: ubuntu-latest
     steps:
       - name: Check out the code (needed for the script)

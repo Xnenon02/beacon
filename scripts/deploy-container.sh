@@ -8,6 +8,12 @@
 
 set -euo pipefail
 
+# Git Bash on Windows rewrites any argument that starts with a single "/" into a
+# Windows path (/subscriptions/... becomes C:/Program Files/Git/subscriptions/...),
+# which makes az fail with MissingSubscription. This switches that off. It has no
+# effect on Linux, macOS or the GitHub runner.
+export MSYS_NO_PATHCONV=1
+
 # Read the optional flag first, then drop it, so the arguments below keep their
 # positions whether or not it was given.
 WHAT_IF=false

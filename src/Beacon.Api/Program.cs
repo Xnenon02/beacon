@@ -17,11 +17,12 @@ app.UseStaticFiles();
 app.MapGet("/api/status", () => new
 {
     app = "Beacon",
-    status = "running (container pipeline test)"
+    status = "running"
 });
 
-// Health check. Used by App Service (week 35), by health-check.sh (week 36)
-// and by the container (week 38). Do not remove.
+// Health check. Used by the App Service health check setting and by
+// scripts/health-check.sh, which both pipelines run after every deployment.
+// Do not remove.
 app.MapGet("/health", () => Results.Ok("OK"));
 
 app.MapGet("/api/games/search", async (string query, SteamClient steamClient, CancellationToken ct) =>
