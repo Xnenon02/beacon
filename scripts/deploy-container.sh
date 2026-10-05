@@ -53,11 +53,37 @@ fi
 DEPLOYMENT_NAME="container-$(date +%Y%m%d-%H%M%S)"
 echo "Mode:           deploy ($DEPLOYMENT_NAME)"
 
-APP_URL=$(az deployment group create \
+# Start the deployment and wait for it as two separate steps. When az both starts
+# and follows a deployment it sometimes loses track of it (DeploymentNotFound)
+# although Azure goes on to create it. Starting with --no-wait still stops here
+# if the start itself fails; waiting by name does not depend on that first poll.
+az deployment group create \
   --name "$DEPLOYMENT_NAME" \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$TEMPLATE" \
   --parameters "$PARAM_FILE" \
+  --no-wait \
+  --output none
+
+az deployment group wait \
+  --name "$DEPLOYMENT_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --created --interval 10 --timeout 1800
+
+# Do not trust the exit code of wait alone: check the end state ourselves.
+STATE=$(az deployment group show \
+  --name "$DEPLOYMENT_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query properties.provisioningState \
+  --output tsv)
+if [ "$STATE" != "Succeeded" ]; then
+  echo "Deployment $DEPLOYMENT_NAME ended in state: $STATE" >&2
+  exit 1
+fi
+
+APP_URL=$(az deployment group show \
+  --name "$DEPLOYMENT_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
   --query properties.outputs.appUrl.value \
   --output tsv)
 
