@@ -1,0 +1,5 @@
+# Shell scripts and the Dockerfile run on Linux (the GitHub runner, the container
+# build). Git for Windows may check files out with CRLF line endings, which
+# breaks bash scripts ("$'\r': command not found"), so keep these as LF.
+*.sh        text eol=lf
+Dockerfile  text eol=lf

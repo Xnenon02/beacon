@@ -44,12 +44,22 @@ jobs:
 
       - name: Build and push the image in ACR
         run: |
-          az acr build \
-            --registry "${{ env.ACR_NAME }}" \
-            --image "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
-            --image "${{ env.IMAGE_NAME }}:latest" \
-            --file src/Beacon.Api/Dockerfile \
-            .
+          # The first build against a new registry sometimes fails with
+          # ParentResourceNotFound although the registry exists. Retry before failing.
+          for attempt in 1 2 3; do
+            if az acr build \
+              --registry "${{ env.ACR_NAME }}" \
+              --image "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+              --image "${{ env.IMAGE_NAME }}:latest" \
+              --file src/Beacon.Api/Dockerfile \
+              .; then
+              exit 0
+            fi
+            echo "Build failed (attempt $attempt of 3). Retrying in 20 s..."
+            sleep 20
+          done
+          echo "az acr build failed 3 times." >&2
+          exit 1
 
   deploy:
     needs: build-and-push
