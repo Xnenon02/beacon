@@ -12,7 +12,7 @@ Both are created with Bicep, built and deployed by GitHub Actions, and designed 
 - **Part C** lists everything that actually went wrong while building this, as symptom, cause, fix.
 - **Part D** checks the result against the assignment.
 
-> The chronological lab log this document was rewritten from is still in git history: `git show 8364863:TUTORIAL.md`.
+> Last tested end to end on 2026-10-05; see "Verification status" at the end for exactly what was and was not run. The chronological lab log this document was rewritten from is still in git history: `git show 8364863:TUTORIAL.md`.
 
 ---
 
@@ -410,7 +410,7 @@ gh workflow run deploy-container.yml
 
 | Concern | What was done | Why |
 |---|---|---|
-| **Pipeline authentication** | OIDC with a federated credential on `gh-clo25-<name>-we`. Nothing secret is stored in GitHub; only three identifiers (client, tenant, subscription id) are kept as repository *variables*. | A stored password works anywhere, for anyone who obtains it, until someone rotates it. A federated token is issued per run, lives for minutes, and Azure only accepts it for the exact subject `repo:<owner>/<repo>:ref:refs/heads/main`: this repository, this branch, nothing else. A pull request or another branch cannot sign in. |
+| **Pipeline authentication** | OIDC with a federated credential on `gh-clo25-<name>-we`. The pipelines use no secret at all (no workflow contains `secrets.`); only three identifiers (client, tenant, subscription id) are read from repository *variables*. | A stored password works anywhere, for anyone who obtains it, until someone rotates it. A federated token is issued per run, lives for minutes, and Azure only accepts it for the exact subject `repo:<owner>/<repo>:ref:refs/heads/main`: this repository, this branch, nothing else. A pull request or another branch cannot sign in. |
 | **Least privilege** | The identity has `Contributor` on **one resource group**, not on the subscription. The workflows request only `id-token: write` and `contents: read`. | If the pipeline were compromised it could change this one group, not the subscription. The price: a role assignment belongs to its scope and **is deleted with the resource group**, so after every teardown it must be granted again. The scripts do that (the block at the end of `deploy-infra.sh`). The pipeline cannot re-grant it for itself, which is correct: an identity that could assign its own roles would defeat the purpose. |
 | **Application secrets** | The web app has a system-assigned managed identity; Key Vault grants that identity `get` and `list` only. The app setting holds a Key Vault *reference*. The secret value was passed in through an environment variable (`@secure()` in the template, `readEnvironmentVariable` in the parameter file), so it is not in Git and shows as `*******` in `what-if` and deployment history. | The app proves who it is with its identity; no password exists to leak. Read-only for the app means a compromised app cannot overwrite secrets. |
 | **Key Vault permission model** | Access policies (`enableRbacAuthorization: false`), a deliberate trade-off. | RBAC is the recommended model, but it needs a role assignment per identity, and role assignments die with the resource group (the same problem as above). Access policies live inside the vault resource and work with plain `Contributor`. Less granular and older, but it works with the rights this subscription grants. With the right to assign roles, RBAC would be the better choice. |
@@ -429,7 +429,7 @@ gh workflow run deploy-container.yml
 | Container hosting | Container Apps | **AKS**: powerful, but a cluster to operate is far more than a small stateless API needs. **Container Instances**: runs a container but has no revisions, autoscaling or managed ingress. **App Service for Containers**: would reuse the same plan model as the web track and show nothing new about container-native scaling. |
 | Infrastructure as code | Bicep | **Terraform**: cloud-neutral and widely used, but adds a tool, a provider and a state file to protect, for a project that only targets Azure. **ARM JSON**: the same engine, far harder to read. **Imperative `az` scripts**: cannot describe the desired state or preview a change; they drift. |
 | CI/CD | GitHub Actions | **Azure DevOps Pipelines**: a second service and sign-in for code that already lives on GitHub. |
-| Pipeline login | OIDC federated credential | **Publish profile** (used first): a key tied to one app instance, dead after every rebuild, and it can only upload code, not create resources. **Service principal secret** (`AZURE_CREDENTIALS`, used next): works, but it is a stored password. Both were used and replaced; the secret was kept as a fallback until OIDC had been shown to work after a teardown and rebuild, then removed. |
+| Pipeline login | OIDC federated credential | **Publish profile** (used first): a key tied to one app instance, dead after every rebuild, and it can only upload code, not create resources. **Service principal secret** (`AZURE_CREDENTIALS`, used next): works, but it is a stored password. Both were used and replaced; the secret was kept as a fallback until OIDC had been shown to work after a teardown and rebuild, which the verification run did (see Verification status). |
 | Image build | `az acr build` | **Local `docker build`**: not possible on this machine. **`docker build` and `docker push` on the runner**: works, but needs the registry password as a pipeline secret. |
 | Deployment strategy | In-place on the web track, revisions on the container track | **Slot swap (blue-green)**: needs Standard. **Canary / traffic split**: Container Apps supports it with multiple active revisions; more configuration than a small API with a health gate needs. |
 | Secret store | Key Vault with managed identity | **GitHub or app settings holding the value**: the secret would be copied into places that cannot be audited or rotated centrally. |
@@ -446,6 +446,7 @@ gh workflow run deploy-container.yml
 - **Two things decide which image runs** (the template's `:v1` and the pipeline's commit SHA); running `deploy-container.sh` after a deployment rolls the app back to `v1`. Next step: have the template read the current image instead of pinning one.
 - **The registry is defined twice**: created with `az acr create` in `provision-all.sh` (it must exist before the first image) and declared in `container.bicep`, which then finds it unchanged. It works, but it is duplication.
 - **Registry admin user and public network access** (B4), and **Key Vault, `MY_SECRET` and the `AcrPull` role are not part of the rebuild** (B4).
+- **Old credentials still exist, unused.** Eight repository secrets from earlier approaches (`AZURE_CREDENTIALS`, `AZURE_CLIENT_SECRET`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, three `AZUREAPPSERVICE_*`) are still in the repository settings, and the older service principal's password still exists in Entra ID. No workflow uses them. They should be deleted (`gh secret delete <name>`, and removing the old app registration), which was left until OIDC had been proven over a full rebuild; the verification run is that proof.
 - **A fresh role assignment takes a minute or two to work**, and nothing in the scripts waits for it (C-5).
 - **Regions come and go per subscription.** West Europe worked on one day and was closed to new resources a week later; the scripts take the region from `LOCATION`, but nothing checks in advance that a region will accept the deployment (C-3).
 - **Tests are minimal**: two tests (health endpoint, root page). The pipeline gate exists; coverage of the API is thin.
@@ -503,4 +504,19 @@ Each of these happened while building this. Symptom, cause, fix.
 
 ## Verification status
 
-_(filled in after the end-to-end run, see below)_
+This document was tested by following it, on **2026-10-05**, against an empty Azure subscription state (no resource group) with the repository's real names (`NAME=namn`).
+
+**Run for real, with the commands as written**
+- A2: tests and local run (`/health`, `/api/status`, `/api/games/search`).
+- A3: the name substitution, on a scratch copy of the repository (all templates and parameter files still compile afterwards; no placeholder left).
+- A5: every command, on a temporary app registration (`gh-clo25-tutorialtest-we`) that was created, inspected and deleted again. `gh variable set` was not re-run, because it would overwrite the real variables.
+- A6: `./scripts/provision-all.sh` built both tracks from nothing (resource group, plan, web app, registry, image, Container Apps environment, container app, role assignment). It took three runs; the failures are C-3, C-18 and C-20, and the scripts were changed to handle the last two. Region: **Sweden Central**, because West Europe was closed to new resources for this subscription that day.
+- A7 and A8: both pipelines are green on commit `c425257`, first attempt, from a pushed commit: [web track run](https://github.com/Xnenon02/beacon/actions/runs/37327245801) and [container track run](https://github.com/Xnenon02/beacon/actions/runs/37327245703). Before the first deployment the web app answered `404` on `/health` and `/api/status`; after it, `200` and `{"app":"Beacon","status":"running"}`. The image running in the Container App had exactly the commit's SHA as its tag; the plan had 3 instances; the revision list showed the rollout described in B3. An earlier run on the way there failed on a timing problem and went green when re-run (C-18, C-20; [run 1](https://github.com/Xnenon02/beacon/actions/runs/37323165135), [run 2](https://github.com/Xnenon02/beacon/actions/runs/37324469228)).
+- Starting the pipelines by hand with `gh workflow run deploy.yml` and `gh workflow run deploy-container.yml` (the way to deploy after a rebuild): both green ([web](https://github.com/Xnenon02/beacon/actions/runs/37327745572), [container](https://github.com/Xnenon02/beacon/actions/runs/37327752033)).
+- A10: the teardown commands were run at the end of the session.
+- The failure paths of the changed scripts: a start that fails (stops after 3 s), a deployment that starts but fails (stops after 19 s, exit 1).
+
+**Not re-run on that day**
+- A1 (login, provider registration) and A4 (`rm -rf .git`, `gh repo create`): standard commands, with flags checked against `--help` but not executed, since they would have replaced the repository's history or created a second repository.
+- A9 (Key Vault): `infra/security.bicep` and `infra/security.bicepparam` were checked with `what-if` against the running app (they plan the vault and the secret; the secret value does not appear in the output), but not deployed: the vault name `kv-clo25-namn-we` is still reserved by the soft-deleted vault from 2026-09-29 (scheduled purge 2026-10-06). The Key Vault reference and the `Resolved` check were last run for real on 2026-09-29.
+- **No load test** was done, and no second person has followed the document yet.
