@@ -184,6 +184,14 @@ gh repo create beacon --public --source=. --remote=origin
 
 The pipelines need an identity in Azure. Instead of a password it gets a **federated credential**: Azure trusts a token only if GitHub issued it for exactly this repository and the `main` branch.
 
+> **If you are new to Azure, three words before the commands:**
+>
+> - **App registration**: the identity itself, a named entry in Entra ID (Azure's user directory) that stands for "the GitHub pipeline".
+> - **Service principal**: the copy of that identity inside your subscription. This is the thing that can be given a role (permission) later.
+> - **Federated credential**: the rule that says "trust a login token issued by GitHub for this repository and branch". It replaces a password, so there is nothing to store or leak.
+>
+> The commands below create these three, in that order.
+
 The identity lives in Entra ID and survives teardown, so you only create it once. First check whether it already exists:
 
 ```bash
@@ -442,9 +450,10 @@ gh workflow run deploy-container.yml
 **Short answer:** it needs nothing installed locally, and it keeps the pipeline free of registry passwords.
 
 - **What it is.** `az acr build` sends the build context to Azure and builds there. It takes the same `--file` and build-context arguments as `docker build`.
-- **Why not local Docker.** Docker Desktop did not start on the author's Windows 11 Home machine. The cause and the fix are in C-19. Building in Azure means this document can be followed on a machine like that one, and a reader who has Docker can still build locally.
+- **Why not local Docker.** Docker Desktop did not start on the author's Windows 11 Home machine (cause and fix in C-19), so `az acr build` was chosen as the alternative. It produces the same image from the same `Dockerfile`, and this document can be followed on a machine like that one. A reader who has Docker can still build locally.
+- **What it costs.** Local Docker is free. `az acr build` is billed per second of build time on top of the registry, which the container track needs anyway, so for a small image the extra cost is low. That small cost was accepted in exchange for a build that works on any machine.
 - **A benefit.** The runner needs no registry password, only the OIDC login it already has.
-- **The cost.** There is no local `docker run` smoke test. The first real test of an image is the deployed Container App.
+- **The downside.** There is no local `docker run` smoke test. The first real test of an image is the deployed Container App.
 
 ## B2. Scaling and load balancing, in both tracks
 
@@ -582,7 +591,7 @@ After a Container App rollout the check proves that *a* replica answers `200`, n
 | Infrastructure as code | Bicep | **Terraform**: cloud-neutral and widely used, but adds a tool, a provider and a state file to protect, for a project that only targets Azure. **ARM JSON**: the same engine, far harder to read. **Imperative `az` scripts**: cannot describe the desired state or preview a change; they drift. |
 | CI/CD | GitHub Actions | **Azure DevOps Pipelines**: a second service and sign-in for code that already lives on GitHub. |
 | Pipeline login | OIDC federated credential | **Publish profile** (used first): a key tied to one app instance, dead after every rebuild, and it can only upload code, not create resources. **Service principal secret** (`AZURE_CREDENTIALS`, used next): works, but it is a stored password. Both were used and replaced; the secret was kept as a fallback until OIDC had been shown to work after a teardown and rebuild, which the verification run did. |
-| Image build | `az acr build` | **Local `docker build`**: Docker Desktop did not start on this machine (B1), and nothing in the assignment needs it. **`docker build` and `docker push` on the runner**: works, but needs the registry password as a pipeline secret. |
+| Image build | `az acr build` | **Local `docker build`**: free, but Docker Desktop did not start on this machine (B1), so building in ACR was chosen instead, at a small cost per build. **`docker build` and `docker push` on the runner**: works, but needs the registry password as a pipeline secret. |
 | Deployment strategy | In-place on the web track, revisions on the container track | **Slot swap (blue-green)**: needs Standard. **Canary / traffic split**: Container Apps supports it with multiple active revisions; more configuration than a small API with a health gate needs. |
 | Secret store | Key Vault with managed identity | **GitHub or app settings holding the value**: the secret would be copied into places that cannot be audited or rotated centrally. |
 | Vault permissions | Access policies | **RBAC**: preferred in general, blocked here by the need to assign roles per identity (B4). |
@@ -599,6 +608,7 @@ After a Container App rollout the check proves that *a* replica answers `200`, n
 - **No probes on the container.** The `probes` list is empty (checked with `az containerapp show`), and `/health` is only used by the pipeline's check. Next step: HTTP liveness and readiness probes on `/health`, so a new replica only receives traffic when it is healthy.
 - **No monitoring.** The Container Apps environment has no log destination (`appLogsConfiguration.destination` is `null`), and there is no Log Analytics workspace, alert or dashboard.
 - **Two things decide which image runs:** the template's `:v1` and the pipeline's commit SHA. Running `deploy-container.sh` after a deployment rolls the app back to `v1`. Next step: have the template read the current image instead of pinning one.
+- **The Dockerfile copies everything before it restores.** `COPY . .` comes before `dotnet restore`, so any source change invalidates the restore layer and every image build downloads the packages again. Next step: copy only the `.csproj` files first, run `dotnet restore`, and copy the rest afterwards, so the package layer is cached until the dependencies change.
 - **The registry is defined twice:** created with `az acr create` in `provision-all.sh` (it must exist before the first image) and declared in `container.bicep`, which then finds it unchanged. It works, but it is duplication.
 - **Registry admin user and public network access** (B4). **Key Vault, `MY_SECRET` and the `AcrPull` role are not part of the rebuild** (B4).
 - **One old credential still exists, unused.** The older service principal `sp-clo25-namn-we`, used by the earlier password-based login, is still an app registration with a password and should be removed (`az ad app delete`). The old repository secrets were deleted once OIDC had been proven over a full rebuild.
