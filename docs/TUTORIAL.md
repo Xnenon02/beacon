@@ -86,6 +86,7 @@ Run every command from the repository root in **bash**: Git Bash on Windows, any
 | .NET SDK | 10.0 | `dotnet --version` |
 | GitHub CLI | 2.97 | `gh --version` |
 | bash and perl | Git Bash on Windows 11 (perl ships with it), Linux, macOS | `bash --version` |
+| A GitHub account | free, at github.com | `gh auth status`, after signing in below |
 
 Docker is **not** needed: images are built in Azure with `az acr build` (reason in B1).
 
@@ -103,7 +104,7 @@ Sign in, and register the resource providers a new subscription may not have use
 az login
 az account show --query "{subscription:name, user:user.name}" -o table
 
-gh auth login                       # needs the scopes repo and workflow
+gh auth login --scopes workflow
 gh auth status
 
 for ns in Microsoft.ContainerRegistry Microsoft.App Microsoft.KeyVault; do
@@ -111,29 +112,43 @@ for ns in Microsoft.ContainerRegistry Microsoft.App Microsoft.KeyVault; do
 done
 ```
 
+For `gh auth login`, choose GitHub.com, HTTPS and "Login with a web browser". `gh auth status` must then show you as logged in, with both `repo` and `workflow` under token scopes (`workflow` is not included by default, and without it the first push is rejected, C-17). Unlike the variables in A3, both sign-ins are stored on the computer: you do them once, not in every terminal.
+
 On Windows, work in Git Bash. If `az` complains about a path, see C-4.
 
 ## A2. Get the code and run it locally
 
 Run the app before touching Azure. If something fails later, this tells you whether the app or the deployment is at fault.
 
+Open **Git Bash** (on Windows: Start menu, "Git Bash"). Not Command Prompt and not PowerShell: a prompt that starts with `C:\Users\...>` is Command Prompt, and the commands below will fail there (C-24). Git Bash shows a `$` and a path like `~`.
+
 ```bash
 git clone https://github.com/Xnenon02/beacon.git beacon
 cd beacon
-
-dotnet test --configuration Release     # expect: Passed!  Failed: 0, Passed: 2
-dotnet run --project src/Beacon.Api     # listens on http://localhost:5001
+dotnet test --configuration Release
 ```
 
-In a second terminal:
+Expect `Passed!  Failed: 0, Passed: 2`. Then start the app:
 
 ```bash
-curl http://localhost:5001/health       # "OK"
-curl http://localhost:5001/api/status   # {"app":"Beacon","status":"running"}
-curl "http://localhost:5001/api/games/search?query=dota"   # a JSON list of games
+dotnet run --project src/Beacon.Api
 ```
 
-Open `http://localhost:5001/` for the search page. Stop the app with Ctrl+C.
+Wait until it prints `Now listening on: http://localhost:5001`. **Leave this terminal open**: the app runs for as long as it does. Open a second Git Bash window, which starts in your home folder (the commands below work from there), and run:
+
+```bash
+curl http://localhost:5001/health
+curl http://localhost:5001/api/status
+curl "http://localhost:5001/api/games/search?query=dota"
+```
+
+| Command | Expected answer |
+|---|---|
+| `/health` | `"OK"` |
+| `/api/status` | `{"app":"Beacon","status":"running"}` |
+| `/api/games/search?query=dota` | a JSON list of games |
+
+Open `http://localhost:5001/` for the search page. Stop the app with Ctrl+C in the first terminal. If `curl` says it cannot connect, the app is not running: see C-24.
 
 ## A3. Choose your names
 
@@ -172,11 +187,16 @@ grep -rn namn infra .github scripts || echo "no placeholders left"
 
 Do this now, before the first push. The next step needs the repository to exist, and the first push starts both pipelines, which must not run before Azure is ready.
 
+`gh` must be signed in first (A1), otherwise the repository is not created or not connected. Run this in the `beacon` folder. The first line drops the author's history so that you start your own:
+
 ```bash
-rm -rf .git                            # drop the author's history, start your own
+rm -rf .git
 git init -b main
 gh repo create beacon --public --source=. --remote=origin
+git remote -v
 ```
+
+`git remote -v` must print two lines starting with `origin` and ending in `github.com/<your user>/beacon.git`. If it prints nothing, the repository exists on GitHub but this folder is not connected to it: see C-25. Create the repository with this command rather than on the GitHub website: a repository created there with a README is not empty, and your first push would be rejected.
 
 `--public` lets anyone read it; a private repository works too if the person assessing it is added as a collaborator. Nothing is pushed yet.
 
@@ -192,24 +212,46 @@ The pipelines need an identity in Azure. Instead of a password it gets a **feder
 >
 > The commands below create these three, in that order.
 
-The identity lives in Entra ID and survives teardown, so you only create it once. First check whether it already exists:
+The identity lives in Entra ID and survives teardown, so you only create it once. Run all five steps below, in order, in the **same terminal**. There is nothing to skip: each step finds what already exists and only creates what is missing, so the same commands work on a first run and after a half-finished attempt. Copy them from this page, not through a chat app (C-26).
+
+**Step 1. Check that your names and your repository are set.**
 
 ```bash
-az ad app list --display-name "$IDENT" --query "[].appId" -o tsv
+echo "$IDENT"
+git remote -v
 ```
 
-If that printed an id, set `CLIENT_ID` to it and skip to the variables below. Otherwise:
+- `echo` must print `gh-clo25-<your name>-we`. If the line is empty, run the `export` lines of A3 again in this terminal. The A3 variables only live in the terminal where they were set, and with an empty `$IDENT` the next step would pick up an app in the tenant that is not yours.
+- `git remote -v` must show your own repository from A4. If it prints nothing, see C-25.
+
+**Step 2. The identity** (an app registration plus its service principal). This finds the identity if it exists, creates it if not, and stores its id in `CLIENT_ID`.
 
 ```bash
-# 1. The identity: an app registration plus its service principal
-CLIENT_ID=$(az ad app create --display-name "$IDENT" --query appId -o tsv)
-az ad sp create --id "$CLIENT_ID" -o none
+CLIENT_ID=$(az ad app list --display-name "$IDENT" --query "[0].appId" -o tsv)
+if [ -z "$CLIENT_ID" ]; then
+  CLIENT_ID=$(az ad app create --display-name "$IDENT" --query appId -o tsv)
+fi
+if ! az ad sp show --id "$CLIENT_ID" -o none 2>/dev/null; then
+  az ad sp create --id "$CLIENT_ID" -o none
+fi
+echo "$CLIENT_ID"
+az ad app show --id "$CLIENT_ID" --query displayName -o tsv
+```
 
-# 2. Ask GitHub which "subject" it will put in the token. Do not type it by hand.
+The first line printed is an id like `1a2b3c4d-...`: that is `CLIENT_ID`. The second must be the same name that `echo "$IDENT"` printed; then the identity is yours.
+
+**Step 3. Ask GitHub which "subject" it will put in the token.** Do not type it by hand. Type `{owner}/{repo}` exactly like that: `gh` fills them in from the repository you are standing in.
+
+```bash
 SUB_PREFIX=$(gh api repos/{owner}/{repo}/actions/oidc/customization/sub --jq .sub_claim_prefix)
-echo "$SUB_PREFIX"                     # repo:<owner>@<id>/<repo>@<id>
+echo "$SUB_PREFIX"
+```
 
-# 3. The federated credential: only runs on the main branch of this repository
+It prints something like `repo:<owner>@<id>/<repo>@<id>`. Azure will later compare every login token from GitHub with this text, character by character.
+
+**Step 4. The federated credential**, which only trusts runs on the main branch of this repository. If it already exists, it is updated instead.
+
+```bash
 cat > credential.json <<EOF
 {
   "name": "github-main",
@@ -218,11 +260,18 @@ cat > credential.json <<EOF
   "audiences": ["api://AzureADTokenExchange"]
 }
 EOF
-az ad app federated-credential create --id "$CLIENT_ID" --parameters credential.json -o none
+if az ad app federated-credential show --id "$CLIENT_ID" --federated-credential-id github-main -o none 2>/dev/null; then
+  az ad app federated-credential update --id "$CLIENT_ID" --federated-credential-id github-main --parameters credential.json -o none
+else
+  az ad app federated-credential create --id "$CLIENT_ID" --parameters credential.json -o none
+fi
 rm credential.json
+az ad app federated-credential list --id "$CLIENT_ID" --query "[].subject" -o tsv
 ```
 
-Give the workflows the three identifiers they need. These are **variables, not secrets**: they identify the identity but cannot be used to sign in.
+The last command must print the text from step 3 followed by `:ref:refs/heads/main`.
+
+**Step 5. Give the workflows the three identifiers they need.** These are **variables, not secrets**: they identify the identity but cannot be used to sign in.
 
 ```bash
 gh variable set AZURE_CLIENT_ID       --body "$CLIENT_ID"
@@ -684,6 +733,9 @@ Each of these happened while building this. Find the category, then the symptom.
 | C-4 | `MissingSubscription`, or a path like `C:/Program Files/Git/subscriptions/...` in an error | Git Bash on Windows rewrote an argument starting with `/` | `export MSYS_NO_PATHCONV=1` (the scripts do it themselves). It hit four times in four different places: any `az` argument starting with a single `/` is suspect. |
 | C-15 | `az` shows `null` for the plan id of a web app | An older Azure CLI names the field `appServicePlanId` instead of `serverFarmId` | `az upgrade`, or use the old field name. |
 | C-16 | A teardown or provisioning log shows success, but steps are missing | `script ... \| tee log` reports the exit code of `tee`, not of the script | Look for the script's last line (`Both tracks are up.`) instead of the exit code. |
+| C-24 | `curl: (7) Failed to connect to localhost port 5001`, or `curl: (3) URL rejected` and `Could not resolve host: OK` | Two separate causes. **(7)**: nothing is listening on port 5001, because `dotnet run` was never started, was started from a folder that is not the repository (`dotnet run` then fails with "project not found"), or its terminal was closed. **(3) and "Could not resolve host"**: the commands were typed in Command Prompt or PowerShell, where `#` does not start a comment, so text after it is passed to `curl` as extra addresses. | Open Git Bash. In the first terminal run `cd beacon` and `dotnet run --project src/Beacon.Api`, and wait for `Now listening on: http://localhost:5001`. Keep it open and run `curl` from a second terminal. Type only the command, not any `#` text after it. |
+| C-25 | `unable to expand placeholder in path: no git remotes found` from `gh api repos/{owner}/{repo}/...`, or `git remote -v` prints nothing | A4 did not finish: the folder is not connected to a GitHub repository. It happens when `gh repo create` ran before `gh auth login`, from another folder, or without `--source=.`. The repository may exist on GitHub anyway. | In the `beacon` folder: `git remote add origin "https://github.com/$(gh api user --jq .login)/beacon.git"`, then `git remote -v`. If `gh repo view "$(gh api user --jq .login)/beacon"` says the repository does not exist, run the `gh repo create` line of A4 instead. |
+| C-26 | `bash: [: missing ']'`, or a command does something else than described, after it was pasted from a chat app | Chat apps change text. Discord turns `\|\|...\|\|` into a spoiler and removes the bars; others turn quotes into curly quotes. | Copy commands from this page (GitHub's copy button on each block). When sending them to someone, put them in a code block (three backticks), which chat apps leave untouched. |
 | C-19 | Docker commands fail with `docker: command not found` or "Virtualization support not detected" | Docker's WSL2 backend needs three things: virtualization enabled in the firmware (BIOS/UEFI), the Windows feature Virtual Machine Platform *fully installed*, and the hypervisor actually starting (`hypervisorlaunchtype` must not be `Off`). If the feature install was left pending, the hypervisor runs but WSL2 cannot create a VM; `wsl --status` then says "virtualization is not enabled", which is misleading. This was the case on the author's machine: `pending.xml` existed and `vmcompute.exe` was missing. | Check in this order. (1) `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` must be `True`. If not, `bcdedit /enum '{current}'` must show `hypervisorlaunchtype Auto` (quote the braces in PowerShell, otherwise `bcdedit` fails with `/encodedCommand`), and `wsl --install --no-distribution` followed by a Restart installs the feature. (2) `Test-Path C:\Windows\System32\vmcompute.exe` must be `True`. If not, the installation is pending: finish it in Windows Update with *Update and restart* (a plain Restart does not install staged updates), and if that is not enough run `dism /online /cleanup-image /restorehealth` and `sfc /scannow` as administrator. Or skip all of this and use `az acr build` (B1), which needs no local Docker. |
 
 ---
@@ -726,6 +778,12 @@ Each of these happened while building this. Find the category, then the symptom.
 
 Last tested end to end on **2026-10-05** against an empty Azure subscription, with the repository's real names (`NAME=namn`). A classmate has since read the document and given feedback on readability, which is reflected in its structure.
 
+On **2026-10-08** a second classmate, new to Azure, followed A1 to A5 on their own Windows machine. They got stuck in four places, and each one is now fixed in the step itself and listed in Part C:
+- commands run in Command Prompt instead of Git Bash, and `curl` run while the app was not running (A2, C-24);
+- `gh` not signed in, so A4 created the repository without connecting the folder to it (A1, A4, C-25);
+- an empty `$IDENT` in a new terminal, and A5 asking the reader to choose which steps to skip. A5 is now one straight path that is safe to run again (tested twice in a row on a temporary identity, which was deleted afterwards);
+- commands pasted through Discord, which removed `||` (C-26).
+
 **Verified by running the commands as written**
 - A2 (local run), A3 (name substitution, on a scratch copy), A5 (identity commands, on a temporary app registration that was deleted again), A6 (`provision-all.sh` from nothing), A7 and A8 (both pipelines green, running image equal to the pushed commit), A10 (teardown).
 - Both pipelines green on commit `c425257`: [web track run](https://github.com/Xnenon02/beacon/actions/runs/37327245801) and [container track run](https://github.com/Xnenon02/beacon/actions/runs/37327245703). The same two started by hand with `gh workflow run` were also green: [web](https://github.com/Xnenon02/beacon/actions/runs/37327745572) and [container](https://github.com/Xnenon02/beacon/actions/runs/37327752033).
@@ -737,6 +795,6 @@ Last tested end to end on **2026-10-05** against an empty Azure subscription, wi
 - `provision-all.sh` took three runs because of C-3, C-18 and C-20. The scripts were changed to handle the last two.
 
 **Not verified**
-- A1 and A4 were checked against `--help` but not run, since they would replace the repository's history or create a second repository.
+- A1 and A4 were not run by the author, since they would replace this repository's history or create a second repository. They were checked against `--help`, and the classmate above ran both on 2026-10-08.
 - A9 was checked with `what-if` but not deployed, because the vault name was still reserved. The Key Vault reference and the `Resolved` check were last run for real on 2026-09-29.
 - There was no load test, and no second person has completed all the steps.
