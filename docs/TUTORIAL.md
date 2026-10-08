@@ -815,9 +815,9 @@ Each of these happened while building this. Find the category, then the symptom.
 
 ## Verification status
 
-Last tested end to end on **2026-10-05** against an empty Azure subscription, with the repository's real names (`NAME=namn`). A classmate has since read the document and given feedback on readability, which is reflected in its structure.
+Last tested end to end on **2026-10-05** against an empty Azure subscription, with the repository's real names (`NAME=namn`). A classmate taking the same course, with the same or more experience than the author, has since read the document and given feedback on readability, which is reflected in its structure.
 
-On **2026-10-08** a friend with no experience of Azure or of this course followed A1 to A7 on their own Windows machine with a Free Trial subscription, and then tore everything down. They did not get both pipelines green. Every place where they got stuck is now handled in the step itself and listed in Part C:
+On **2026-10-08** a friend with no experience of Azure or of this course followed A1 to A7 on their own Windows machine with a Free Trial subscription, and then tore everything down. **They could not complete the tutorial, because of a limitation in Azure:** a Free Trial subscription blocks the image build, so the container track could not be done at all on their account (C-27). The web track stopped at the first pipeline run (details under "Not verified" below). Every place where they got stuck is now handled in the step itself and listed in Part C:
 - commands run in Command Prompt instead of Git Bash, and `curl` run while the app was not running (A2, C-24);
 - `gh` not signed in, so A4 created the repository without connecting the folder to it (A1, A4, C-25);
 - an empty `$IDENT` in a new terminal, and A5 asking the reader to choose which steps to skip. A5 is now one straight path that is safe to run again (tested twice in a row on a temporary identity, which was deleted afterwards);
