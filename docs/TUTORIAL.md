@@ -88,15 +88,16 @@ Run every command from the repository root in **bash**: Git Bash on Windows, any
 | bash and perl | Git Bash on Windows 11 (perl ships with it), Linux, macOS | `bash --version` |
 | A GitHub account | free, at github.com | `gh auth status`, after signing in below |
 
-Docker is **not** needed: images are built in Azure with `az acr build` (reason in B1).
+Docker is **not** needed: images are built in Azure with `az acr build` (reason in B1), as long as the subscription allows it (point 4 below).
 
 You need an Azure subscription where you may:
 
 1. create resource groups,
-2. create role assignments on them (Owner or User Access Administrator), and
-3. create app registrations in Entra ID.
+2. create role assignments on them (Owner or User Access Administrator),
+3. create app registrations in Entra ID, and
+4. build images with ACR Tasks, which is what `az acr build` uses. A **Free Trial** subscription does not allow it (C-27). How to check is below.
 
-If you cannot do 2 or 3, skip A5 and run the deploy scripts yourself. The assignment accepts running privileged steps manually if the tutorial says so.
+If you cannot do 2 or 3, skip A5 and run the deploy scripts yourself. The assignment accepts running privileged steps manually if the tutorial says so. If you cannot do 4, the web track still works but the container track needs Docker on your own machine instead (C-27).
 
 Sign in, and register the resource providers a new subscription may not have used yet (harmless if they already are):
 
@@ -113,6 +114,30 @@ done
 ```
 
 For `gh auth login`, choose GitHub.com, HTTPS and "Login with a web browser". `gh auth status` must then show you as logged in, with both `repo` and `workflow` under token scopes (`workflow` is not included by default, and without it the first push is rejected, C-17). Unlike the variables in A3, both sign-ins are stored on the computer: you do them once, not in every terminal.
+
+Check which kind of subscription you have (point 4 above):
+
+```bash
+az rest --method get --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)?api-version=2022-12-01" --query "subscriptionPolicies.quotaId" -o tsv
+```
+
+`PayAsYouGo_...` builds images (tested). `FreeTrial_...` cannot: `az acr build` fails with `TasksOperationsNotAllowed` (C-27). Other offers paid for with free credits, such as Azure for Students, are reported to block it as well; that was not tested here.
+
+Git must also know your name and e-mail, otherwise the first commit in A7 fails (C-28). Check first:
+
+```bash
+git config --global user.email
+```
+
+If that prints an address, you are done. If it prints nothing, set both once, using GitHub's private no-reply address so that your own e-mail does not end up in a public repository:
+
+```bash
+git config --global user.name "$(gh api user --jq .login)"
+git config --global user.email "$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
+git config --global user.email
+```
+
+The last line must print an address ending in `@users.noreply.github.com`.
 
 On Windows, work in Git Bash. If `az` complains about a path, see C-4.
 
@@ -154,8 +179,10 @@ Open `http://localhost:5001/` for the search page. Stop the app with Ctrl+C in t
 
 Several Azure names must be globally unique, so everything is built from one short name of your own: 3 to 12 lowercase letters or digits, starting with a letter. The repository ships with the author's placeholder `namn`.
 
+Replace `CHANGE_ME` on the first line with your own name before you run the block. It is deliberately not a valid name, so the check below stops you if you forget.
+
 ```bash
-export NAME=alice                      # <- your own name here
+export NAME=CHANGE_ME
 
 export RG=rg-clo25-$NAME-we            # resource group
 export PLAN=asp-clo25-$NAME-we         # App Service plan
@@ -169,6 +196,14 @@ export LOCATION=westeurope             # the Azure region
 ```
 
 These variables only live in this terminal. **Run this block again in every new terminal.**
+
+Check the name before going on. A capital letter, a dash or an underscore is easy to miss here and only fails in A6, when the container registry is created:
+
+```bash
+if [[ "$NAME" =~ ^[a-z][a-z0-9]{2,11}$ ]]; then echo "name OK"; else echo "name NOT OK"; fi
+```
+
+If it says `NOT OK`, change the first line of the block above (for example `CHANGE_ME` or `Alice` to `alice`) and run the block again. Get the name right now: the next command writes it into eight files, and changing it afterwards takes more than running A3 again (C-10).
 
 `LOCATION` is where the resource group, and everything in it, is created. The `-we` in the names is only text and does not have to match the region. If a region is full or closed for your subscription, use another one such as `swedencentral` (C-1 to C-3).
 
@@ -313,7 +348,7 @@ You should see:
 
 The web app is **empty** at this point: the infrastructure exists, the code does not. The pipeline deploys the code next.
 
-If a step fails or seems stuck, see C-3, C-18, C-20, C-21 and C-23.
+If a step fails or seems stuck, see C-3, C-18, C-20, C-21 and C-23. If the image build fails with `TasksOperationsNotAllowed`, your subscription blocks ACR Tasks: see C-27.
 
 ## A7. Deploy the application with the pipelines
 
@@ -503,6 +538,7 @@ gh workflow run deploy-container.yml
 - **What it costs.** Local Docker is free. `az acr build` is billed per second of build time on top of the registry, which the container track needs anyway, so for a small image the extra cost is low. That small cost was accepted in exchange for a build that works on any machine.
 - **A benefit.** The runner needs no registry password, only the OIDC login it already has.
 - **The downside.** There is no local `docker run` smoke test. The first real test of an image is the deployed Container App.
+- **A second downside, found by a classmate.** The build works on any machine, but not on every subscription. ACR Tasks are blocked on Free Trial subscriptions, where `az acr build` fails with `TasksOperationsNotAllowed` (C-27). The author's Pay-As-You-Go subscription was never affected, so this only showed up when someone else followed the document. A pipeline that ran `docker build` and `docker push` on the GitHub runner would avoid it (B6).
 
 ## B2. Scaling and load balancing, in both tracks
 
@@ -658,6 +694,7 @@ After a Container App rollout the check proves that *a* replica answers `200`, n
 - **No monitoring.** The Container Apps environment has no log destination (`appLogsConfiguration.destination` is `null`), and there is no Log Analytics workspace, alert or dashboard.
 - **Two things decide which image runs:** the template's `:v1` and the pipeline's commit SHA. Running `deploy-container.sh` after a deployment rolls the app back to `v1`. Next step: have the template read the current image instead of pinning one.
 - **The Dockerfile copies everything before it restores.** `COPY . .` comes before `dotnet restore`, so any source change invalidates the restore layer and every image build downloads the packages again. Next step: copy only the `.csproj` files first, run `dotnet restore`, and copy the rest afterwards, so the package layer is cached until the dependencies change.
+- **The image build depends on ACR Tasks**, which Free Trial subscriptions block (C-27). On such a subscription only the web track can be rebuilt from this document, and `provision-all.sh` retries five times on an error that will never pass. Next step: build in the container pipeline with `docker build` and `docker push` on the GitHub runner, which has Docker installed and does not use ACR Tasks, and let the script stop at once on `TasksOperationsNotAllowed`. Neither was done before the deadline, since a change to the workflow or the scripts starts both pipelines against an environment that is torn down.
 - **The registry is defined twice:** created with `az acr create` in `provision-all.sh` (it must exist before the first image) and declared in `container.bicep`, which then finds it unchanged. It works, but it is duplication.
 - **Registry admin user and public network access** (B4). **Key Vault, `MY_SECRET` and the `AcrPull` role are not part of the rebuild** (B4).
 - **One old credential still exists, unused.** The older service principal `sp-clo25-namn-we`, used by the earlier password-based login, is still an app registration with a password and should be removed (`az ad app delete`). The old repository secrets were deleted once OIDC had been proven over a full rebuild.
@@ -700,7 +737,7 @@ Each of these happened while building this. Find the category, then the symptom.
 | C-2 | `Operation cannot be completed without additional quota. Current Limit (B1 VMs): 0` | The subscription has no B1 quota in that region (not transient) | Use another region (`LOCATION=... ./scripts/provision-all.sh ...`) or request quota. |
 | C-3 | `RequestDisallowedByAzure ... The selected region is currently not accepting new customers` | The region is closed to new resources for this subscription (it worked earlier, then stopped). The resource group is created but stays empty. `az appservice list-locations` still lists the region, so it cannot warn you. | Delete the empty group (`az group delete -n "$RG" --yes`), `export LOCATION=swedencentral` (or another region), and run A6 again. A resource group's region cannot be changed, which is why it must be recreated. |
 | C-9 | `MissingSubscriptionRegistration` | A resource provider was never used in this subscription | `az provider register --namespace Microsoft.App --wait` (also `Microsoft.ContainerRegistry`, `Microsoft.KeyVault`). |
-| C-10 | `Website with given name ... already exists`, or the registry name is rejected | Names are globally unique; registry names allow only lowercase letters and digits | Pick another `NAME` and redo A3. `az acr check-name --name <name> -o table` checks a registry name. |
+| C-10 | `Registry name must use only lowercase`, `Website with given name ... already exists`, or the registry name is otherwise rejected | Names are globally unique, and registry names allow only lowercase letters and digits: a `NAME` with a capital letter fails here, in A6 | Pick another `NAME` and change it everywhere. First `OLD=$NAME`, then run the A3 block again with the new name, then replace the old name in the files with `perl -pi -e "s/$OLD/$NAME/g"` on the same eight files as in A3, and check with `grep -rn "$OLD" infra .github scripts` (should print nothing). Running A3's `perl` line again does not help: `namn` is already gone from the files. Then run A6 again; resources it already created under the old spelling are reused, because Azure names are not case-sensitive. `az acr check-name --name <name> -o table` checks a registry name in advance. |
 | C-13 | `BCP427` when deploying `security.bicep` | `DEPLOYER_OBJECT_ID` or `SECRET_VALUE` is not set in this terminal | Export both (A9). |
 | C-14 | Key Vault name rejected after a teardown | A deleted vault keeps its name for 7 days | Use a new `VAULT` name. |
 | C-20 | `az deployment group create` ends with `DeploymentNotFound: Deployment ... could not be found` | The CLI asked for the status of a deployment that Azure Resource Manager had not registered yet (eventual consistency). The deployment itself went on and succeeded. Seen on a laptop and in the pipeline, in roughly one deployment in three on the day this was verified. | The deploy scripts avoid it: they start the deployment with `--no-wait`, wait for it by name, and check that its end state is `Succeeded` (a failed start or a failed deployment still stops them with exit 1; both were tested). For your own `az deployment group create`, `az deployment group list -g "$RG" -o table` shows the real state; every script is idempotent, so running it again is safe. |
@@ -725,6 +762,7 @@ Each of these happened while building this. Find the category, then the symptom.
 | C-12 | `RequestDisallowedByPolicy` on the registry | The subscription forbids `adminUserEnabled: true` | Set it to `false`. The Container App then needs the managed-identity route from B4. |
 | C-18 | `az acr build` fails with `ParentResourceNotFound ... listBuildSourceUploadUrl` on the first build against a new registry | The build service does not (yet) see the registry although it exists (eventual consistency in Azure's control plane). Seen right after creation from a laptop, and again from the GitHub runner twenty minutes later; the same build worked a minute afterwards from the laptop. | Run it again. `provision-all.sh` retries up to five times and the container workflow up to three times. If a pipeline run still fails, `gh run rerun <id> --failed`. |
 | C-22 | `az containerapp revision list` shows the old revision as `Active: True` with `Traffic: 0` right after a rollout | Normal transition: the old revision is stopped a minute or two after the new one is ready | Wait and list again. It becomes `Active: False` (`Stopped`, 0 replicas). Add `properties.runningState` and `properties.replicas` to the `--query` to see it. |
+| C-27 | `(TasksOperationsNotAllowed) ACR Tasks requests for the registry ... are not permitted` from `az acr build`, in step 3/4 of `provision-all.sh` or in the container pipeline | The subscription does not allow ACR Tasks. Microsoft blocks them on Free Trial subscriptions (seen on a classmate's `FreeTrial_2014-09-01` subscription on 2026-10-08), and reportedly on other offers paid for with free credits. It is permanent, so the retries in `provision-all.sh` cannot help. | Steps 1 and 2 have already run when the script stops, so the web app and the registry exist. **Web track:** nothing more to do in A6; continue with A7 and expect only the web pipeline to go green. **Container track:** convert the subscription to Pay-As-You-Go (needs a payment card), or build on your own machine with Docker running: `az acr login --name "$ACR"`, `docker build -t "$ACR.azurecr.io/beacon:v1" -f src/Beacon.Api/Dockerfile .`, `docker push "$ACR.azurecr.io/beacon:v1"`, then `./scripts/deploy-container.sh "$RG"`. The container pipeline still uses `az acr build` and stays red on such a subscription (B6). The Docker commands were not run against this repository. |
 
 ## Local environment
 
@@ -736,6 +774,7 @@ Each of these happened while building this. Find the category, then the symptom.
 | C-24 | `curl: (7) Failed to connect to localhost port 5001`, or `curl: (3) URL rejected` and `Could not resolve host: OK` | Two separate causes. **(7)**: nothing is listening on port 5001, because `dotnet run` was never started, was started from a folder that is not the repository (`dotnet run` then fails with "project not found"), or its terminal was closed. **(3) and "Could not resolve host"**: the commands were typed in Command Prompt or PowerShell, where `#` does not start a comment, so text after it is passed to `curl` as extra addresses. | Open Git Bash. In the first terminal run `cd beacon` and `dotnet run --project src/Beacon.Api`, and wait for `Now listening on: http://localhost:5001`. Keep it open and run `curl` from a second terminal. Type only the command, not any `#` text after it. |
 | C-25 | `unable to expand placeholder in path: no git remotes found` from `gh api repos/{owner}/{repo}/...`, or `git remote -v` prints nothing | A4 did not finish: the folder is not connected to a GitHub repository. It happens when `gh repo create` ran before `gh auth login`, from another folder, or without `--source=.`. The repository may exist on GitHub anyway. | In the `beacon` folder: `git remote add origin "https://github.com/$(gh api user --jq .login)/beacon.git"`, then `git remote -v`. If `gh repo view "$(gh api user --jq .login)/beacon"` says the repository does not exist, run the `gh repo create` line of A4 instead. |
 | C-26 | `bash: [: missing ']'`, or a command does something else than described, after it was pasted from a chat app | Chat apps change text. Discord turns `\|\|...\|\|` into a spoiler and removes the bars; others turn quotes into curly quotes. | Copy commands from this page (GitHub's copy button on each block). When sending them to someone, put them in a code block (three backticks), which chat apps leave untouched. |
+| C-28 | `Author identity unknown` on `git commit`, then `src refspec main does not match any` on `git push`, then `no runs found` or `HTTP 404: workflow deploy.yml not found` | Git has no name or e-mail on this computer, so the commit was never made. With no commit there is nothing to push, so GitHub has no workflow files and no runs. | Set the identity as in A1 (the two `git config --global` lines), then run `git commit` and `git push` from A7 again. |
 | C-19 | Docker commands fail with `docker: command not found` or "Virtualization support not detected" | Docker's WSL2 backend needs three things: virtualization enabled in the firmware (BIOS/UEFI), the Windows feature Virtual Machine Platform *fully installed*, and the hypervisor actually starting (`hypervisorlaunchtype` must not be `Off`). If the feature install was left pending, the hypervisor runs but WSL2 cannot create a VM; `wsl --status` then says "virtualization is not enabled", which is misleading. This was the case on the author's machine: `pending.xml` existed and `vmcompute.exe` was missing. | Check in this order. (1) `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` must be `True`. If not, `bcdedit /enum '{current}'` must show `hypervisorlaunchtype Auto` (quote the braces in PowerShell, otherwise `bcdedit` fails with `/encodedCommand`), and `wsl --install --no-distribution` followed by a Restart installs the feature. (2) `Test-Path C:\Windows\System32\vmcompute.exe` must be `True`. If not, the installation is pending: finish it in Windows Update with *Update and restart* (a plain Restart does not install staged updates), and if that is not enough run `dism /online /cleanup-image /restorehealth` and `sfc /scannow` as administrator. Or skip all of this and use `az acr build` (B1), which needs no local Docker. |
 
 ---
@@ -778,11 +817,14 @@ Each of these happened while building this. Find the category, then the symptom.
 
 Last tested end to end on **2026-10-05** against an empty Azure subscription, with the repository's real names (`NAME=namn`). A classmate has since read the document and given feedback on readability, which is reflected in its structure.
 
-On **2026-10-08** a second classmate, new to Azure, followed A1 to A5 on their own Windows machine. They got stuck in four places, and each one is now fixed in the step itself and listed in Part C:
+On **2026-10-08** a second classmate, new to Azure, followed A1 to A7 on their own Windows machine with a Free Trial subscription, and then tore everything down. They did not get both pipelines green. Every place where they got stuck is now handled in the step itself and listed in Part C:
 - commands run in Command Prompt instead of Git Bash, and `curl` run while the app was not running (A2, C-24);
 - `gh` not signed in, so A4 created the repository without connecting the folder to it (A1, A4, C-25);
 - an empty `$IDENT` in a new terminal, and A5 asking the reader to choose which steps to skip. A5 is now one straight path that is safe to run again (tested twice in a row on a temporary identity, which was deleted afterwards);
-- commands pasted through Discord, which removed `||` (C-26).
+- commands pasted through Discord, which removed `||` (C-26);
+- `az acr build` refused with `TasksOperationsNotAllowed`, because the Free Trial subscription blocks ACR Tasks (A1, C-27, B6). This is a real limitation of the design, not of the reader;
+- Git had no name or e-mail, so the first commit in A7 was never made (A1, C-28);
+- the example name in A3 was run unchanged, and the name was changed afterwards, which left one name in the files and another in Azure. The example is now `CHANGE_ME`, A3 checks the name, and C-10 explains how to change it after the files have been written.
 
 **Verified by running the commands as written**
 - A2 (local run), A3 (name substitution, on a scratch copy), A5 (identity commands, on a temporary app registration that was deleted again), A6 (`provision-all.sh` from nothing), A7 and A8 (both pipelines green, running image equal to the pushed commit), A10 (teardown).
