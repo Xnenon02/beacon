@@ -1,11 +1,11 @@
 name: Build and deploy the container to Container Apps
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
+  # push:
+  #   branches:
+  #     - main
+  #   paths-ignore:
+  #     - '**.md'
   workflow_dispatch:
 
 # Lets every job ask GitHub for an OIDC token, which azure/login exchanges for

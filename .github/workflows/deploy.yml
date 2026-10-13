@@ -1,12 +1,12 @@
 name: Build and deploy to App Service
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - '**.http'
+  # push:
+  #   branches:
+  #     - main
+  #   paths-ignore:
+  #     - '**.md'
+  #     - '**.http'
   workflow_dispatch:
 
 # Lets every job ask GitHub for an OIDC token, which azure/login exchanges for
